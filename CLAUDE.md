@@ -19,13 +19,23 @@ making architectural changes.
 
 ## Current status
 
-- **Milestone 0 (DONE — scaffolded):** CLI spike proving the orchestrator ->
-  subagent flow end to end. Idea -> Planner spec -> Coder writes a one-page
-  Next.js app to disk. Lives in `backend/`. No web UI, no gates yet.
-- **Milestone 1 (next):** add Scaffolder, Reviewer (with a green-build loop),
-  Deployer; add SQLite state and an event bus; still CLI-driven.
-- **Milestones 2–4:** Next.js dashboard (SSE live feed) → approval gates →
-  polish (diff viewer, per-worker model selection, cost tracking).
+- **Milestone 0 (DONE):** CLI spike proving the orchestrator -> subagent flow
+  end to end. Idea -> Planner spec -> Coder writes a one-page Next.js app to
+  disk. Verified live: page.tsx written, 3 turns, ~$0.26/run.
+- **Milestone 1 (DONE):** full backend pipeline. Added Scaffolder, Reviewer
+  (with a Coder↔Reviewer green-build loop, capped at 3 rounds), Deployer
+  (Vercel CLI, opt-in via `--deploy`). SQLite-backed run state at
+  `backend/shipit.db` (`runs` + `events` tables). `EventBus` fans events to
+  the CLI printer + the SQLite recorder; in M2 the SSE handler is a third
+  listener. The orchestrator is now a **Python state machine**, not a model
+  agent — each stage opens its own focused `query()` with that role as the
+  main agent (`system_prompt`), so context is isolated and gating is trivial
+  to add. CLI: `--deploy`, `--max-rounds`, per-role `--*-model`,
+  `--list-runs`, `--show-run <id>`.
+- **Milestone 2 (next):** Next.js dashboard (read-only) that lists runs and
+  streams the live `PipelineEvent` feed over SSE.
+- **Milestones 3–4:** approval gates (spec / code / deploy) → polish (diff
+  viewer, model selection per worker, cost tracking).
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.
@@ -38,14 +48,20 @@ When you complete a milestone, update this section and the milestone list in
 ├── SHIP-IT_BUILD_PLAN.md     # the design doc / source of truth
 ├── backend/                  # Python backend (Claude Agent SDK)
 │   ├── app/
-│   │   ├── agents/           # one AgentDefinition factory per worker
+│   │   ├── agents/           # one stage-options factory per worker
 │   │   │   ├── planner.py    # think-only: idea -> spec
-│   │   │   └── coder.py      # Read/Write/Edit/Bash: spec -> files
-│   │   ├── orchestrator.py   # pipeline runner + PipelineEvent stream
-│   │   └── run_spike.py      # Milestone 0 CLI entrypoint
+│   │   │   ├── scaffolder.py # Read/Write/Edit/Bash: fresh Next.js project
+│   │   │   ├── coder.py      # Read/Write/Edit/Bash: spec -> page.tsx
+│   │   │   ├── reviewer.py   # Read/Bash (read-only): lint/tsc/build verdict
+│   │   │   └── deployer.py   # Read/Bash: vercel deploy --prod
+│   │   ├── events.py         # PipelineEvent + EventBus
+│   │   ├── store.py          # SQLite Store: runs + events
+│   │   ├── orchestrator.py   # Python state machine driving the stages
+│   │   └── run_spike.py      # CLI entrypoint (M0+M1)
 │   ├── requirements.txt
+│   ├── shipit.db             # (gitignored) SQLite run/event store
 │   └── .env.example
-├── generated_app/            # (gitignored) output of a spike run
+├── workspaces/               # (gitignored) per-run generated apps
 └── tutorial/                 # progressive teaching tutorial (3 stages)
 ```
 

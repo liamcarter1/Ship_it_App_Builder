@@ -24,7 +24,8 @@ Thumbs.db
 generated_app/
 workspaces/
 
-# SQLite (Milestone 1)
+# SQLite (Milestone 1+)
 *.db
 *.sqlite
 *.sqlite3
+backend/shipit.db*

@@ -127,9 +127,9 @@ Next Agent Build/
 
 ## 7. Build milestones
 
-**Milestone 0 — Spike (prove the core loop). ✅ SCAFFOLDED.** A CLI-only script: one orchestrator + a Planner and a Coder subagent that takes an idea and writes a 1-page Next.js app to disk. No UI, no gates. Goal: confirm the Agent SDK subagent flow works end to end. *Built in `backend/` — run with `python -m app.run_spike`. Code verified against `claude-agent-sdk` 0.2.87 (imports, signatures, compile); a live run needs your Claude auth. See `backend/README.md`.*
+**Milestone 0 — Spike (prove the core loop). ✅ DONE.** A CLI-only script: one orchestrator + a Planner and a Coder subagent that takes an idea and writes a 1-page Next.js app to disk. No UI, no gates. Goal: confirm the Agent SDK subagent flow works end to end. *Live-run verified: `page.tsx` written, 3 turns, ~$0.26/run.*
 
-**Milestone 1 — Full backend pipeline.** Add Scaffolder, Reviewer (with the build-green loop), and Deployer. Add SQLite state and the event bus. Drive it from the CLI. Output: a real deployed Vercel URL from a typed idea.
+**Milestone 1 — Full backend pipeline. ✅ DONE.** Scaffolder, Reviewer (with the Coder↔Reviewer build-green loop, capped at 3 rounds), and Deployer (`--deploy` flag, Vercel CLI) all wired in. SQLite `runs` + `events` schema at `backend/shipit.db`, and an `EventBus` that fans every PipelineEvent to both the CLI printer and the recorder (the SSE handler will be the third listener in M2). The orchestrator is now an explicit **Python state machine** — each stage opens its own focused `query()` with that role as the main agent (`system_prompt`), so context is isolated and Milestone 3's gates drop in naturally between stages. CLI flags: `--deploy`, `--max-rounds`, per-role `--*-model`, `--list-runs`, `--show-run`.
 
 **Milestone 2 — Web dashboard, read-only.** Next.js app that lists runs and streams the live agent activity feed over SSE. No interaction yet — just watch it work.
 
@@ -159,4 +159,4 @@ Orchestrator-worker multi-agent design · Claude Agent SDK subagents and context
 
 ## 10. Recommended next step
 
-Milestone 0 is scaffolded in `backend/`. The immediate next step is to **run it with your Claude auth** and confirm the Planner→Coder flow produces a `generated_app/`. After that, **Milestone 1**: add the Scaffolder, the Reviewer with its green-build loop, the Deployer, and SQLite run state — still CLI-driven, but ending in a real Vercel URL.
+Milestones 0 and 1 are done. The next step is **Milestone 2**: a read-only Next.js dashboard that subscribes to the same `EventBus` the CLI uses (as an SSE listener) and renders the per-run event stream live. SQLite lets it also browse and replay past runs without re-spending tokens.

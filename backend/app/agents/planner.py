@@ -1,26 +1,29 @@
-"""Planner subagent — turns a one-line idea into a concrete spec.
+"""Planner stage — turns a one-line idea into a concrete JSON spec.
 
-Think-only: `tools=[]` means it has no filesystem or shell access. Its sole
-job is to produce a tight JSON spec the Coder can implement against.
+Think-only: `tools=[]`. The downstream Scaffolder + Coder implement against
+the spec without needing to talk back to the Planner.
 """
 from __future__ import annotations
 
-from claude_agent_sdk import AgentDefinition
+from pathlib import Path
+
+from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions
 
 PLANNER_SYSTEM_PROMPT = """\
-You are the **Planner** in a multi-agent app-factory pipeline.
+You are the **Planner** in the Ship-It app factory pipeline.
 
-You receive a one-line product idea. You must produce a tight, concrete spec
-that a downstream Coder subagent can implement without further questions.
+You receive a one-line product idea. Produce a tight, concrete spec a Coder
+can implement without asking further questions.
 
-Constraints for Milestone 0:
-- The output target is a **single-page Next.js (App Router) + TypeScript +
-  Tailwind** site. No backend, no auth, no DB. One `app/page.tsx`.
-- Keep the scope tiny: hero, one or two supporting sections, a clear CTA.
+Constraints:
+- Output target is a **single-page Next.js (App Router) + TypeScript +
+  Tailwind** site. No backend, no auth, no DB. The route is `app/page.tsx`.
+- Keep scope small: hero, 2-3 supporting sections, one CTA. The Coder should
+  be able to ship it in one pass.
 - Do NOT write code. Do NOT include implementation details — that's the
   Coder's job. Stick to *what* and *why*, not *how*.
 
-Respond with **exactly one fenced ```json block** containing this schema, and
+Respond with **exactly one fenced ```json block** matching this schema, and
 nothing else after it:
 
 ```json
@@ -38,22 +41,53 @@ nothing else after it:
 ```
 """
 
+PLANNER_TOOLS: list[str] = []
+
 
 def build_planner(model: str | None = None) -> AgentDefinition:
-    """Factory for the Planner AgentDefinition.
-
-    Args:
-        model: Optional model override (e.g. "claude-haiku-4-5-20251001" for
-            a cheaper planner). Omit to use the SDK default.
-    """
     kwargs: dict = {
         "description": (
             "Turns a one-line product idea into a concrete JSON spec for a "
             "single-page Next.js app. Think-only — no tools."
         ),
         "prompt": PLANNER_SYSTEM_PROMPT,
-        "tools": [],  # think-only
+        "tools": PLANNER_TOOLS,
     }
     if model:
         kwargs["model"] = model
     return AgentDefinition(**kwargs)
+
+
+def build_planner_options(
+    workspace: Path | None = None, *, model: str | None = None, max_turns: int = 6
+) -> ClaudeAgentOptions:
+    """Run the Planner as the main agent of its own `query()`.
+
+    `workspace` is accepted for API parity with the other stages but unused —
+    the Planner has no tools and doesn't touch the filesystem.
+    """
+    kwargs: dict = {
+        "system_prompt": PLANNER_SYSTEM_PROMPT,
+        "allowed_tools": PLANNER_TOOLS,
+        "permission_mode": "acceptEdits",
+        "max_turns": max_turns,
+    }
+    if workspace is not None:
+        kwargs["cwd"] = str(workspace)
+    if model:
+        kwargs["model"] = model
+    return ClaudeAgentOptions(**kwargs)
+
+
+import json
+import re
+
+_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def parse_planner_spec(text: str) -> dict:
+    """Extract the JSON spec from the Planner's final message."""
+    match = _JSON_BLOCK_RE.search(text)
+    if not match:
+        raise ValueError("Planner did not return a fenced JSON block")
+    return json.loads(match.group(1))
