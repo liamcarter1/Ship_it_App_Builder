@@ -38,15 +38,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from .events import EventBus
+from .gates import GateBroker, GateDecision
 from .orchestrator import Orchestrator, OrchestratorConfig, default_workspace_for_run
 from .store import Store
 
 # One shared store + a registry of in-flight orchestrator tasks (so we can
-# show "live" status on /api/runs/{id} and `cancel` it later in M3+).
+# show "live" status on /api/runs/{id} and resolve pending gates).
 _store = Store()
 _active_runs: dict[int, asyncio.Task] = {}
+# Shared in-process broker. Lives for the FastAPI process lifetime; if the
+# server restarts while a gate is pending, the orchestrator task dies with
+# it (the run goes orphaned at 'running'). Restart recovery is M4.
+_gate_broker = GateBroker()
+# Set of gate names the server enforces. Order doesn't matter; presence does.
+_GATED_STAGES: tuple[str, ...] = ("spec", "code", "deploy")
 
 # How often the SSE poller checks SQLite for new rows. 250ms feels live to a
 # human and keeps the DB load trivial (one indexed-range SELECT per tick).
@@ -196,6 +204,8 @@ async def create_run(payload: NewRunPayload):
             config = OrchestratorConfig(
                 max_review_rounds=payload.max_rounds,
                 deploy=payload.deploy,
+                gate_broker=_gate_broker,
+                gated_stages=_GATED_STAGES,
             )
             orchestrator = Orchestrator(bus=bus, store=_store, config=config)
             await orchestrator.run(idea, workspace=workspace, run_id=run_id)
@@ -205,12 +215,63 @@ async def create_run(payload: NewRunPayload):
             # dashboard will see the failure via SSE / the runs list.
             pass
         finally:
+            # Reject any gates still open (the orchestrator should have
+            # closed them all, but if it crashed mid-await we don't want
+            # the broker to leak futures).
+            _gate_broker.cancel_all(run_id, notes="run task exited")
             _active_runs.pop(run_id, None)
 
     _active_runs[run_id] = asyncio.create_task(_run_pipeline())
     return {"run_id": run_id, "workspace": str(workspace)}
 
 
+# ---------------------------------------------------------------------------
+# Gates (Milestone 3)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/runs/{run_id}/gates")
+async def list_gates(run_id: int):
+    """The names of gates currently awaiting a human decision for this run."""
+    if _store.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {"pending": _gate_broker.pending_for(run_id)}
+
+
+class GateResolution(BaseModel):
+    decision: Literal["approve", "reject"]
+    notes: Optional[str] = Field(None, max_length=2000)
+
+
+@app.post("/api/runs/{run_id}/gate/{name}")
+async def post_gate(run_id: int, name: str, body: GateResolution):
+    if name not in _GATED_STAGES:
+        raise HTTPException(status_code=400, detail=f"unknown gate '{name}'")
+    if _store.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    decision = GateDecision(approve=(body.decision == "approve"), notes=body.notes)
+    if not _gate_broker.resolve(run_id, name, decision):
+        # Either no gate ever opened, or it was already resolved (idempotent
+        # PATCH-style retry, or two dashboards racing to approve).
+        raise HTTPException(status_code=404, detail="no pending gate")
+    return {"resolved": True, "decision": body.decision}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: int):
+    """Reject every pending gate for this run, which aborts the pipeline
+    cleanly at the current pause point. The run will end up as
+    `rejected_at_<gate>` in the store."""
+    if _store.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    cancelled = _gate_broker.cancel_all(run_id, notes="cancelled from dashboard")
+    return {"cancelled_gates": cancelled}
+
+
 @app.get("/api/healthz")
 async def healthz():
-    return {"ok": True, "active_runs": len(_active_runs)}
+    return {
+        "ok": True,
+        "active_runs": len(_active_runs),
+        "pending_gates": sum(len(_gate_broker.pending_for(rid)) for rid in _active_runs),
+    }

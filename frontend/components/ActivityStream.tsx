@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { streamUrl } from '@/lib/api';
-import type { EventKind, EventSource, PipelineEventDTO } from '@/lib/types';
+import type { EventKind, EventSource, GateName, PipelineEventDTO } from '@/lib/types';
+import { GatePanel } from './GatePanel';
+
+interface OpenGate {
+  name: GateName;
+  payload: Record<string, unknown>;
+  ts: number;
+}
 
 // Tailwind classes per event source. The base name before any `-r<N>` suffix
 // determines colour (so `coder-r2` looks like `coder`).
@@ -33,6 +40,9 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
   const [connected, setConnected] = useState(false);
   const [streamEnded, setStreamEnded] = useState(alreadyFinished);
   const [error, setError] = useState<string | null>(null);
+  // Gates currently awaiting a human decision. Keyed by gate name (spec /
+  // code / deploy) since at most one of each can be open at any time per run.
+  const [openGates, setOpenGates] = useState<Record<string, OpenGate>>({});
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -54,6 +64,7 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
     const allKinds: EventKind[] = [
       'pipeline_start', 'stage_start', 'stage_end', 'agent_text',
       'tool_use', 'tool_result', 'system', 'review_verdict', 'deploy_url',
+      'gate_open', 'gate_decision',
       'pipeline_end', 'stream_end',
     ];
     const handlers: Array<[string, EventListener]> = [];
@@ -84,7 +95,34 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
           if (parsed.id != null && prev.some((p) => p.id === parsed.id)) return prev;
           return [...prev, { ...parsed, kind: parsed.kind ?? (kind as EventKind) }];
         });
+
+        // Drive the open-gate set off the event log so it's correct both
+        // during live tail AND during full replay (a decided gate's
+        // `gate_open` is followed by `gate_decision`, so the gate ends up
+        // closed regardless of order).
+        if (parsed.kind === 'gate_open') {
+          const meta = (parsed.meta ?? {}) as { name?: GateName; payload?: Record<string, unknown> };
+          if (meta.name) {
+            setOpenGates((g) => ({
+              ...g,
+              [meta.name as string]: { name: meta.name as GateName, payload: meta.payload ?? {}, ts: parsed.ts },
+            }));
+          }
+        } else if (parsed.kind === 'gate_decision') {
+          const meta = (parsed.meta ?? {}) as { name?: string };
+          if (meta.name) {
+            setOpenGates((g) => {
+              const next = { ...g };
+              delete next[meta.name as string];
+              return next;
+            });
+          }
+        }
+
         if (parsed.kind === 'pipeline_end') {
+          // Clear any still-open gate panels: the pipeline has finished,
+          // so any pending decision is moot. (E.g. it was cancelled.)
+          setOpenGates({});
           setStreamEnded(true);
           es.close();
         }
@@ -102,31 +140,52 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
     if (!streamEnded) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [events.length, streamEnded]);
 
+  const openGateList = Object.values(openGates).sort((a, b) => a.ts - b.ts);
+
   return (
-    <div className="rounded border border-zinc-800 bg-zinc-950">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2 text-xs">
-        <div className="text-zinc-400">
-          {events.length} event{events.length === 1 ? '' : 's'}
+    <div className="space-y-3">
+      {openGateList.map((g) => (
+        <GatePanel
+          key={g.name}
+          runId={runId}
+          name={g.name}
+          payload={g.payload}
+          onResolved={() => {
+            // Optimistic close; the gate_decision SSE event will also
+            // clear it, so this is just for snappiness.
+            setOpenGates((prev) => {
+              const next = { ...prev };
+              delete next[g.name];
+              return next;
+            });
+          }}
+        />
+      ))}
+      <div className="rounded border border-zinc-800 bg-zinc-950">
+        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2 text-xs">
+          <div className="text-zinc-400">
+            {events.length} event{events.length === 1 ? '' : 's'}
+          </div>
+          <div className="text-zinc-400">
+            {streamEnded ? (
+              <span className="text-zinc-500">stream ended</span>
+            ) : connected ? (
+              <span className="text-cyan-400">● live</span>
+            ) : (
+              <span className="text-amber-400">reconnecting…</span>
+            )}
+          </div>
         </div>
-        <div className="text-zinc-400">
-          {streamEnded ? (
-            <span className="text-zinc-500">stream ended</span>
-          ) : connected ? (
-            <span className="text-cyan-400">● live</span>
+        <div className="max-h-[60vh] overflow-y-auto p-3 text-sm leading-relaxed">
+          {events.length === 0 ? (
+            <p className="text-zinc-600 italic">Waiting for the orchestrator to emit its first event…</p>
           ) : (
-            <span className="text-amber-400">reconnecting…</span>
+            events.map((ev, i) => <EventRow key={ev.id ?? `${ev.ts}-${i}`} ev={ev} />)
           )}
+          <div ref={bottomRef} />
         </div>
+        {error && <p className="px-3 py-2 text-xs text-rose-300">SSE error: {error}</p>}
       </div>
-      <div className="max-h-[60vh] overflow-y-auto p-3 text-sm leading-relaxed">
-        {events.length === 0 ? (
-          <p className="text-zinc-600 italic">Waiting for the orchestrator to emit its first event…</p>
-        ) : (
-          events.map((ev, i) => <EventRow key={ev.id ?? `${ev.ts}-${i}`} ev={ev} />)
-        )}
-        <div ref={bottomRef} />
-      </div>
-      {error && <p className="px-3 py-2 text-xs text-rose-300">SSE error: {error}</p>}
     </div>
   );
 }
@@ -193,6 +252,22 @@ function EventRow({ ev }: { ev: PipelineEventDTO }) {
           </a>
         </div>
       );
+    case 'gate_open':
+      return (
+        <div className="text-amber-300 text-xs uppercase tracking-wide mt-2">
+          ⏸ gate opened: {ev.text}
+        </div>
+      );
+    case 'gate_decision': {
+      const meta = ev.meta as { approve?: boolean; notes?: string | null };
+      const approved = Boolean(meta.approve);
+      return (
+        <div className={approved ? 'text-emerald-300' : 'text-rose-300'}>
+          {approved ? '✓' : '✗'} gate decision: {ev.text} ({approved ? 'approved' : 'rejected'})
+          {meta.notes && <span className="text-zinc-400"> — notes: {meta.notes}</span>}
+        </div>
+      );
+    }
     case 'pipeline_start':
       return <div className={cls}>{ev.text}</div>;
     case 'pipeline_end': {

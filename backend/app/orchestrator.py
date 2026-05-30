@@ -52,6 +52,7 @@ from .agents import (
     parse_reviewer_verdict,
 )
 from .events import EventBus, PipelineEvent
+from .gates import GateBroker, GateDecision
 from .store import Store, attach_store_to_bus
 
 
@@ -186,6 +187,12 @@ class OrchestratorConfig:
     deployer_model: Optional[str] = None
     max_review_rounds: int = 3
     deploy: bool = False  # default off — Vercel auth not assumed
+    # Approval gates (Milestone 3). When `gate_broker` is None or a given
+    # stage isn't in `gated_stages`, `_gate()` auto-approves silently. The
+    # CLI keeps both at defaults so M1/M2 behaviour is unchanged; the
+    # FastAPI server passes a shared broker and the full set.
+    gate_broker: Optional[GateBroker] = None
+    gated_stages: tuple[str, ...] = ()
 
 
 class Orchestrator:
@@ -242,9 +249,15 @@ class Orchestrator:
                 spec = await self._stage_planner(idea, outcome)
                 outcome.spec = spec
 
+                # Spec gate — the cheapest place to course-correct: the
+                # human reviews the JSON spec before any code is written.
+                # Notes (if any) ride along into the Coder's first brief.
+                spec_decision = await self._gate("spec", {"spec": spec}, outcome)
+                spec_notes = spec_decision.notes if spec_decision else None
+
                 await self._stage_scaffolder(workspace, outcome)
 
-                await self._stage_coder_initial(spec, workspace, outcome)
+                await self._stage_coder_initial(spec, workspace, outcome, gate_notes=spec_notes)
 
                 verdict = await self._coder_reviewer_loop(spec, workspace, outcome)
                 outcome.last_verdict = verdict
@@ -258,7 +271,22 @@ class Orchestrator:
                     page_tsx = workspace / "app" / "page.tsx"
                     outcome.page_tsx_written = page_tsx.exists()
 
+                    # Code gate — review the green build + reviewer verdict
+                    # before going further. Always fires (deploy or no), so
+                    # CLI/'built' runs get a final approval too.
+                    await self._gate(
+                        "code",
+                        {"workspace": str(workspace), "verdict": verdict},
+                        outcome,
+                    )
+
                     if self.config.deploy:
+                        # Deploy gate — last chance before pushing to Vercel.
+                        await self._gate(
+                            "deploy",
+                            {"workspace": str(workspace)},
+                            outcome,
+                        )
                         deploy = await self._stage_deployer(workspace, outcome)
                         outcome.deploy = deploy
                         outcome.status = (
@@ -349,12 +377,59 @@ class Orchestrator:
             )
 
     async def _stage_coder_initial(
-        self, spec: dict, workspace: Path, outcome: RunOutcome
+        self,
+        spec: dict,
+        workspace: Path,
+        outcome: RunOutcome,
+        *,
+        gate_notes: Optional[str] = None,
     ) -> None:
         options = build_coder_options(workspace, model=self.config.coder_model)
-        prompt = build_coder_brief(spec)
+        prompt = build_coder_brief(spec, gate_notes=gate_notes)
         result = await _run_stage(stage="coder", prompt=prompt, options=options, bus=self.bus)
         self._add_cost(outcome, "coder", result)
+
+    async def _gate(
+        self, name: str, payload: dict, outcome: RunOutcome
+    ) -> Optional[GateDecision]:
+        """Pause for human approval at `name` if configured; otherwise
+        return None and continue silently.
+
+        Emits `gate_open` (the dashboard renders an approve/reject panel
+        from this event) and `gate_decision` (the dashboard dismisses the
+        panel). A rejection raises PipelineFailure, which the outer error
+        handler in `run()` records as `outcome.status = rejected_at_<name>`.
+        """
+        if name not in self.config.gated_stages or self.config.gate_broker is None:
+            return None
+        await self.bus.emit(
+            PipelineEvent(
+                kind="gate_open",
+                source="orchestrator",
+                text=name,
+                meta={"name": name, "payload": payload},
+            )
+        )
+        future = self.config.gate_broker.open(outcome.run_id, name)
+        decision = await future
+        await self.bus.emit(
+            PipelineEvent(
+                kind="gate_decision",
+                source="orchestrator",
+                text=name,
+                meta={
+                    "name": name,
+                    "approve": decision.approve,
+                    "notes": decision.notes,
+                },
+            )
+        )
+        if not decision.approve:
+            outcome.status = f"rejected_at_{name}"
+            raise PipelineFailure(
+                f"rejected at gate '{name}': {decision.notes or '(no notes)'}"
+            )
+        return decision
 
     async def _stage_reviewer(self, workspace: Path, outcome: RunOutcome) -> dict:
         options = build_reviewer_options(workspace, model=self.config.reviewer_model)

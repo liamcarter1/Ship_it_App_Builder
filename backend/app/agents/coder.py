@@ -83,10 +83,23 @@ def build_coder_options(
     return ClaudeAgentOptions(**kwargs)
 
 
-def build_coder_brief(spec: dict[str, Any]) -> str:
-    """User prompt for the first Coder pass."""
+def build_coder_brief(spec: dict[str, Any], *, gate_notes: str | None = None) -> str:
+    """User prompt for the first Coder pass.
+
+    `gate_notes`, when present, is the human reviewer's free-text feedback
+    from the spec-approval gate. It's prepended verbatim so the Coder
+    treats it as a hard requirement on top of the spec.
+    """
+    notes_block = ""
+    if gate_notes and gate_notes.strip():
+        notes_block = (
+            "Human reviewer notes (from the spec-approval gate). Apply these "
+            "in addition to the spec — they override the spec on any conflict:\n"
+            f"  {gate_notes.strip()}\n\n"
+        )
     return (
-        "Implement the spec below into this scaffolded Next.js project.\n\n"
+        notes_block
+        + "Implement the spec below into this scaffolded Next.js project.\n\n"
         "Target files:\n"
         "  - `app/page.tsx` (required) — implement all sections from the spec\n"
         "  - `app/layout.tsx` (already exists; edit only if metadata changes)\n"

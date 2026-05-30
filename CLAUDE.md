@@ -37,12 +37,19 @@ making architectural changes.
   (`GET /api/runs/{id}/events/stream`). The SSE stream polls SQLite for new
   rows past `last_id` — that one design choice means the dashboard
   works equally well for runs started in-process (via API) and runs started
-  in another process by the M1 CLI. Read-only: no approval gates yet
-  (that's M3).
-- **Milestone 3 (next):** approval gates (spec / code / deploy) — backend
-  pauses, frontend panels for approve/reject/notes, resume on response.
-- **Milestone 4:** polish — diff viewer, model selection per worker, cost
-  tracking dashboards, error recovery.
+  in another process by the M1 CLI.
+- **Milestone 3 (DONE):** approval gates. New `backend/app/gates.py`
+  (`GateBroker` + `GateDecision`); the orchestrator emits `gate_open`,
+  awaits an `asyncio.Future` resolved by `POST /api/runs/{id}/gate/{name}`,
+  then emits `gate_decision`. Three gates fire: **spec** (before any code
+  is written; notes flow into the Coder's brief), **code** (after the
+  green build), and **deploy** (only when `--deploy`). The dashboard
+  renders an approve/reject/notes panel from `gate_open` events and clears
+  it on `gate_decision`. `POST /api/runs/{id}/cancel` rejects every
+  pending gate, aborting the run cleanly. CLI keeps M1/M2 behaviour: when
+  `OrchestratorConfig.gate_broker is None`, `_gate()` is a silent no-op.
+- **Milestone 4 (next):** polish — diff viewer, model selection per worker,
+  cost dashboards, restart-resumable gates, error recovery.
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.
@@ -63,8 +70,9 @@ When you complete a milestone, update this section and the milestone list in
 │   │   │   └── deployer.py   # Read/Bash: vercel deploy --prod
 │   │   ├── events.py         # PipelineEvent + EventBus
 │   │   ├── store.py          # SQLite Store: runs + events
+│   │   ├── gates.py          # GateBroker + GateDecision (M3)
 │   │   ├── orchestrator.py   # Python state machine driving the stages
-│   │   ├── server.py         # FastAPI app: /api/runs + SSE stream (M2)
+│   │   ├── server.py         # FastAPI app: /api/runs + SSE + gates (M2+M3)
 │   │   └── run_spike.py      # CLI entrypoint (M0+M1)
 │   ├── requirements.txt
 │   ├── shipit.db             # (gitignored) SQLite run/event store
@@ -78,7 +86,8 @@ When you complete a milestone, update this section and the milestone list in
 │   ├── components/
 │   │   ├── RunsList.tsx
 │   │   ├── NewRunForm.tsx
-│   │   └── ActivityStream.tsx# SSE consumer
+│   │   ├── ActivityStream.tsx# SSE consumer + open-gate tracker (M2+M3)
+│   │   └── GatePanel.tsx     # approve/reject/notes panel (M3)
 │   ├── lib/{api,types}.ts    # typed fetch + DTOs mirroring PipelineEvent
 │   └── next.config.mjs       # rewrites /api/* -> FastAPI backend
 ├── workspaces/               # (gitignored) per-run generated apps

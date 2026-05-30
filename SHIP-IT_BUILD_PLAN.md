@@ -133,7 +133,7 @@ Next Agent Build/
 
 **Milestone 2 — Web dashboard, read-only. ✅ DONE.** Next.js 14 + TS + Tailwind dashboard at `frontend/`, served alongside a FastAPI app at `backend/app/server.py`. The dashboard lists runs (refresh every 2s), starts new ones via `POST /api/runs`, and tails live progress via `GET /api/runs/{id}/events/stream` (Server-Sent Events). The SSE handler polls SQLite for new event rows past `last_id` — that single design choice means the dashboard tails any run regardless of which process started it (in-process via API or out-of-process via the M1 CLI), and avoids the classic replay-vs-live race window. Next config rewrites `/api/*` to the FastAPI backend so the dashboard speaks to its own origin.
 
-**Milestone 3 — Approval gates.** Wire the three gates: backend pauses, frontend panels for approve/reject/notes, resume on response. This is where it becomes *yours to control*.
+**Milestone 3 — Approval gates. ✅ DONE.** All three gates wired (`spec` / `code` / `deploy`). The orchestrator emits `gate_open`, awaits an `asyncio.Future` from a per-process `GateBroker` resolved by `POST /api/runs/{id}/gate/{name}`, then emits `gate_decision`. The dashboard's `ActivityStream` derives its open-gate set directly from the event log so approve/reject panels appear correctly on both live tail AND replay. Spec-gate notes are passed verbatim into the Coder's first brief as a hard requirement. `POST /api/runs/{id}/cancel` rejects every pending gate to abort cleanly. CLI behaviour preserved: when `OrchestratorConfig.gate_broker is None`, `_gate()` is a silent no-op.
 
 **Milestone 4 — Polish & reuse.** Diff viewer, project re-open, re-deploy, model selection per worker (cost control), error recovery.
 
@@ -159,4 +159,4 @@ Orchestrator-worker multi-agent design · Claude Agent SDK subagents and context
 
 ## 10. Recommended next step
 
-Milestones 0, 1, and 2 are done. The next step is **Milestone 3**: approval gates. Three pause-points (spec / code / deploy) where the backend stops the state machine, the dashboard renders an approve/reject/notes panel, and the orchestrator resumes on response. The polling-SSE plumbing from M2 makes this easy — gates emit a `gate_open` event with everything the UI needs, and the orchestrator awaits a future resolved by a new `POST /api/runs/{id}/gate/{name}` endpoint.
+Milestones 0–3 are done. The next step is **Milestone 4**: polish. A diff viewer for the code-gate panel (`git diff` against the scaffolder commit), restart-resumable gates (persist pending gate state so an in-flight pause survives a server restart), per-worker model selection from the dashboard, and a cost-tracking overlay so we can see which agents dominate spend over time.

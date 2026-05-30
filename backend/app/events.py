@@ -24,6 +24,8 @@ EventKind = Literal[
     "system",
     "review_verdict",
     "deploy_url",
+    "gate_open",
+    "gate_decision",
     "pipeline_end",
 ]
 

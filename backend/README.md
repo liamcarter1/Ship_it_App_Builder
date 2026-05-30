@@ -113,12 +113,15 @@ so the Next.js dashboard at `../frontend/` can drive it:
 
 | Route | Purpose |
 |---|---|
-| `GET  /api/runs`                     | list runs, newest first |
-| `GET  /api/runs/{id}`                | one run's metadata (+ `live: bool`) |
-| `GET  /api/runs/{id}/events`         | all events for that run (one-shot JSON) |
-| `GET  /api/runs/{id}/events/stream`  | SSE: replay history then live tail |
-| `POST /api/runs`                     | start a new pipeline run |
-| `GET  /api/healthz`                  | liveness probe |
+| `GET  /api/runs`                          | list runs, newest first |
+| `GET  /api/runs/{id}`                     | one run's metadata (+ `live: bool`) |
+| `GET  /api/runs/{id}/events`              | all events for that run (one-shot JSON) |
+| `GET  /api/runs/{id}/events/stream`       | SSE: replay history then live tail |
+| `POST /api/runs`                          | start a new pipeline run |
+| `GET  /api/runs/{id}/gates`               | names of gates currently awaiting a decision (M3) |
+| `POST /api/runs/{id}/gate/{name}`         | approve/reject a gate with optional notes (M3) |
+| `POST /api/runs/{id}/cancel`              | reject every pending gate → abort the run cleanly (M3) |
+| `GET  /api/healthz`                       | liveness probe |
 
 Run it:
 
@@ -136,9 +139,39 @@ the `CORS_ORIGINS` env var (comma-separated). The Next.js dev config
 rewrites `/api/*` to this server, so you usually don't need CORS at all
 during local development.
 
-## What's next (Milestone 3)
+## Approval gates (Milestone 3)
 
-Approval gates (spec / code / deploy). The orchestrator will pause and
-await a `POST /api/runs/{id}/gate/{name}` response; the dashboard will
-render an approve/reject/notes panel triggered by a new `gate_open` event
-on the existing SSE stream.
+Three gates fire when running via the API: **spec** (after the Planner,
+before any code is written), **code** (after the green build), and
+**deploy** (only when the run was started with `deploy=true`). Each gate:
+
+1. The orchestrator emits a `gate_open` event with the relevant payload
+   (the JSON spec for spec; the workspace + verdict for code; the
+   workspace for deploy) and awaits a future from the in-process
+   `GateBroker`.
+2. The dashboard sees `gate_open` on its SSE stream and renders a
+   `GatePanel` with the payload and a notes textarea.
+3. You click Approve or Reject. The dashboard `POST`s to
+   `/api/runs/{id}/gate/{name}` which resolves the future.
+4. The orchestrator emits `gate_decision` and either continues (approve)
+   or aborts the run with `status=rejected_at_<name>` (reject).
+
+Spec-gate notes are passed verbatim into the Coder's first brief as a
+hard requirement, so "use a muted palette" or "no emoji" actually
+constrains the implementation.
+
+The **CLI keeps M1/M2 behaviour**: `OrchestratorConfig.gate_broker` is
+None by default, which makes `_gate()` a silent no-op. If you want
+human-in-the-loop runs, start them from the dashboard (or hit
+`POST /api/runs` directly).
+
+Restart caveat: the broker lives only in process memory. If the FastAPI
+server restarts while a gate is pending, the asyncio task dies with it
+and the run stays as `running` in the DB forever. Restart-resumable
+gates are an M4 concern.
+
+## What's next (Milestone 4)
+
+Polish: a diff viewer in the code-gate panel (`git diff` against the
+scaffolder commit), restart-resumable gates, per-worker model selection
+from the dashboard, and a cost-tracking overlay.

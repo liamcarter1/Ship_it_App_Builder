@@ -45,3 +45,31 @@ export async function createRun(input: NewRunInput): Promise<{ run_id: number }>
 export function streamUrl(runId: number): string {
   return `${API}/runs/${runId}/events/stream`;
 }
+
+export async function resolveGate(
+  runId: number,
+  name: string,
+  approve: boolean,
+  notes?: string,
+): Promise<void> {
+  const res = await fetch(`${API}/runs/${runId}/gate/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      decision: approve ? 'approve' : 'reject',
+      notes: notes && notes.length > 0 ? notes : undefined,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
+  }
+}
+
+export async function cancelRun(runId: number): Promise<{ cancelled_gates: string[] }> {
+  const res = await fetch(`${API}/runs/${runId}/cancel`, { method: 'POST' });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as { cancelled_gates: string[] };
+}

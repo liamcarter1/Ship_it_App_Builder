@@ -11,8 +11,12 @@ export type EventKind =
   | 'system'
   | 'review_verdict'
   | 'deploy_url'
+  | 'gate_open'
+  | 'gate_decision'
   | 'pipeline_end'
   | 'stream_end'; // synthetic, emitted by the SSE handler when the run is over
+
+export type GateName = 'spec' | 'code' | 'deploy';
 
 export type EventSource =
   | 'orchestrator'

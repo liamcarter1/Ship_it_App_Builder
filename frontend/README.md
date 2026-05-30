@@ -59,9 +59,29 @@ cross-process runs.
 - `lib/types.ts` — DTOs that mirror `backend/app/events.py`. Keep them in
   sync as new event kinds land.
 
-## What's next (Milestone 3)
+## Approval gates (Milestone 3)
 
-Approval gates. The dashboard will render an inline approve/reject/notes
-panel when the backend emits a `gate_open` event, and `POST` the response
-to resume the pipeline. The SSE plumbing here is unchanged — gates are
-just one more event kind.
+When you start a run via the dashboard, the orchestrator pauses three
+times for your approval: after the Planner (**spec gate**), after the
+green build (**code gate**), and before deploying (**deploy gate**,
+only with the Deploy checkbox on).
+
+`ActivityStream` derives its open-gate set straight from the event log:
+a `gate_open` event opens a `GatePanel`; a matching `gate_decision`
+removes it. The same logic runs during live tail and during full
+replay, so reloading a paused run from your browser re-renders any
+pending panels correctly.
+
+Spec-gate notes flow into the Coder's brief as a hard requirement; code
+and deploy notes are recorded for the audit log but not injected.
+
+If you start a run and decide you don't want it, **Cancel** (M4 will
+add a UI button — for now `POST /api/runs/{id}/cancel`) rejects every
+pending gate so the orchestrator returns cleanly with a
+`rejected_at_<gate>` status.
+
+## What's next (Milestone 4)
+
+A diff viewer in the code-gate panel, restart-resumable gates,
+per-worker model selection from the New Run form, and a cost-tracking
+overlay.
