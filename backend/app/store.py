@@ -145,6 +145,16 @@ class Store:
                 ).fetchall()
             )
 
+    def list_events_after(self, run_id: int, after_id: int) -> list[sqlite3.Row]:
+        """Events with id > after_id, in id order. Used by the SSE poller."""
+        with connect(self.db_path) as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id ASC",
+                    (run_id, after_id),
+                ).fetchall()
+            )
+
 
 def attach_store_to_bus(bus: EventBus, store: Store, run_id: int) -> Listener:
     """Register the store as a listener on the bus.

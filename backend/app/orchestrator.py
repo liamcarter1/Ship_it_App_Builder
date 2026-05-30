@@ -211,11 +211,16 @@ class Orchestrator:
 
     # --- main entrypoint ---------------------------------------------------
 
-    async def run(self, idea: str, *, workspace: Optional[Path] = None) -> RunOutcome:
+    async def run(self, idea: str, *, workspace: Optional[Path] = None, run_id: Optional[int] = None) -> RunOutcome:
         workspace = workspace or default_workspace_for_run()
         workspace.mkdir(parents=True, exist_ok=True)
 
-        run_id = self.store.create_run(idea=idea, workspace=workspace)
+        # The API server creates the run row up-front so it can return the
+        # run_id to the client before kicking off the pipeline (so the
+        # dashboard can open the SSE stream immediately). The CLI path
+        # passes run_id=None and we create the row here.
+        if run_id is None:
+            run_id = self.store.create_run(idea=idea, workspace=workspace)
         # Per-run listener: attach now, detach in `finally` so reusing this
         # Orchestrator across runs doesn't accumulate stale recorders.
         store_listener = attach_store_to_bus(self.bus, self.store, run_id)

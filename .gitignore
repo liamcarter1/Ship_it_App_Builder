@@ -7,12 +7,13 @@ venv/
 .env
 .env.local
 
-# Node (for the future Next.js frontend + generated apps)
+# Node (Next.js dashboard + generated apps)
 node_modules/
 .next/
 out/
 dist/
 .vercel
+frontend/.env*.local
 
 # OS / editor
 .DS_Store

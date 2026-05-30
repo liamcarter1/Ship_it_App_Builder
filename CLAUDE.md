@@ -26,16 +26,23 @@ making architectural changes.
   (with a Coder↔Reviewer green-build loop, capped at 3 rounds), Deployer
   (Vercel CLI, opt-in via `--deploy`). SQLite-backed run state at
   `backend/shipit.db` (`runs` + `events` tables). `EventBus` fans events to
-  the CLI printer + the SQLite recorder; in M2 the SSE handler is a third
-  listener. The orchestrator is now a **Python state machine**, not a model
-  agent — each stage opens its own focused `query()` with that role as the
-  main agent (`system_prompt`), so context is isolated and gating is trivial
-  to add. CLI: `--deploy`, `--max-rounds`, per-role `--*-model`,
-  `--list-runs`, `--show-run <id>`.
-- **Milestone 2 (next):** Next.js dashboard (read-only) that lists runs and
-  streams the live `PipelineEvent` feed over SSE.
-- **Milestones 3–4:** approval gates (spec / code / deploy) → polish (diff
-  viewer, model selection per worker, cost tracking).
+  the CLI printer + the SQLite recorder. The orchestrator is a **Python
+  state machine**, not a model agent — each stage opens its own focused
+  `query()` with that role as the main agent (`system_prompt`), so context
+  is isolated and gating is trivial to add. CLI: `--deploy`, `--max-rounds`,
+  per-role `--*-model`, `--list-runs`, `--show-run <id>`.
+- **Milestone 2 (DONE):** Next.js + TS + Tailwind dashboard at `frontend/`
+  driven by a FastAPI server at `backend/app/server.py`. The dashboard lists
+  runs, starts new ones (`POST /api/runs`), and tails live progress via SSE
+  (`GET /api/runs/{id}/events/stream`). The SSE stream polls SQLite for new
+  rows past `last_id` — that one design choice means the dashboard
+  works equally well for runs started in-process (via API) and runs started
+  in another process by the M1 CLI. Read-only: no approval gates yet
+  (that's M3).
+- **Milestone 3 (next):** approval gates (spec / code / deploy) — backend
+  pauses, frontend panels for approve/reject/notes, resume on response.
+- **Milestone 4:** polish — diff viewer, model selection per worker, cost
+  tracking dashboards, error recovery.
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.
@@ -46,7 +53,7 @@ When you complete a milestone, update this section and the milestone list in
 .
 ├── CLAUDE.md                 # this file
 ├── SHIP-IT_BUILD_PLAN.md     # the design doc / source of truth
-├── backend/                  # Python backend (Claude Agent SDK)
+├── backend/                  # Python backend (Claude Agent SDK + FastAPI)
 │   ├── app/
 │   │   ├── agents/           # one stage-options factory per worker
 │   │   │   ├── planner.py    # think-only: idea -> spec
@@ -57,16 +64,41 @@ When you complete a milestone, update this section and the milestone list in
 │   │   ├── events.py         # PipelineEvent + EventBus
 │   │   ├── store.py          # SQLite Store: runs + events
 │   │   ├── orchestrator.py   # Python state machine driving the stages
+│   │   ├── server.py         # FastAPI app: /api/runs + SSE stream (M2)
 │   │   └── run_spike.py      # CLI entrypoint (M0+M1)
 │   ├── requirements.txt
 │   ├── shipit.db             # (gitignored) SQLite run/event store
 │   └── .env.example
+├── frontend/                 # Next.js 14 + TS + Tailwind dashboard (M2)
+│   ├── app/                  # App Router pages
+│   │   ├── page.tsx          # runs list + new-idea form
+│   │   ├── runs/[id]/page.tsx# live run view (SSE)
+│   │   ├── layout.tsx
+│   │   └── globals.css
+│   ├── components/
+│   │   ├── RunsList.tsx
+│   │   ├── NewRunForm.tsx
+│   │   └── ActivityStream.tsx# SSE consumer
+│   ├── lib/{api,types}.ts    # typed fetch + DTOs mirroring PipelineEvent
+│   └── next.config.mjs       # rewrites /api/* -> FastAPI backend
 ├── workspaces/               # (gitignored) per-run generated apps
 └── tutorial/                 # progressive teaching tutorial (3 stages)
 ```
 
-The `frontend/` (Next.js dashboard) does not exist yet — it arrives in
-Milestone 2.
+To run the full M2 stack locally:
+
+```bash
+# terminal 1 — FastAPI backend
+cd backend && source .venv/bin/activate
+uvicorn app.server:app --reload --port 8000
+
+# terminal 2 — Next.js dashboard
+cd frontend && npm install && npm run dev    # http://localhost:3000
+```
+
+The Next config rewrites `/api/*` to `http://127.0.0.1:8000` so the dashboard
+calls same-origin URLs (no CORS surprises). Override with
+`NEXT_PUBLIC_BACKEND_URL` if the backend lives elsewhere.
 
 ## How to run (Milestone 0)
 

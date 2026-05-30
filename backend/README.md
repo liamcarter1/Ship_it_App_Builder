@@ -106,8 +106,39 @@ backend/
 └── README.md (this file)
 ```
 
-## What's next (Milestone 2)
+## Dashboard server (Milestone 2)
 
-A Next.js dashboard that lists runs and streams the live `PipelineEvent`
-feed over Server-Sent Events. No interaction yet — just watch a run unfold.
-Approval gates land in Milestone 3.
+A small FastAPI app at `app/server.py` exposes the same pipeline over HTTP
+so the Next.js dashboard at `../frontend/` can drive it:
+
+| Route | Purpose |
+|---|---|
+| `GET  /api/runs`                     | list runs, newest first |
+| `GET  /api/runs/{id}`                | one run's metadata (+ `live: bool`) |
+| `GET  /api/runs/{id}/events`         | all events for that run (one-shot JSON) |
+| `GET  /api/runs/{id}/events/stream`  | SSE: replay history then live tail |
+| `POST /api/runs`                     | start a new pipeline run |
+| `GET  /api/healthz`                  | liveness probe |
+
+Run it:
+
+```bash
+uvicorn app.server:app --reload --port 8000
+```
+
+The SSE handler polls SQLite for new rows past the client's last id
+(default ~250 ms). This means it tails any run regardless of which
+process started it — runs from `POST /api/runs` and runs from `python -m
+app.run_spike` both appear, because both write to the same `shipit.db`.
+
+CORS is configured for `http://localhost:3000` by default; override with
+the `CORS_ORIGINS` env var (comma-separated). The Next.js dev config
+rewrites `/api/*` to this server, so you usually don't need CORS at all
+during local development.
+
+## What's next (Milestone 3)
+
+Approval gates (spec / code / deploy). The orchestrator will pause and
+await a `POST /api/runs/{id}/gate/{name}` response; the dashboard will
+render an approve/reject/notes panel triggered by a new `gate_open` event
+on the existing SSE stream.

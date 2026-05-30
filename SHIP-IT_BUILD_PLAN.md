@@ -131,7 +131,7 @@ Next Agent Build/
 
 **Milestone 1 — Full backend pipeline. ✅ DONE.** Scaffolder, Reviewer (with the Coder↔Reviewer build-green loop, capped at 3 rounds), and Deployer (`--deploy` flag, Vercel CLI) all wired in. SQLite `runs` + `events` schema at `backend/shipit.db`, and an `EventBus` that fans every PipelineEvent to both the CLI printer and the recorder (the SSE handler will be the third listener in M2). The orchestrator is now an explicit **Python state machine** — each stage opens its own focused `query()` with that role as the main agent (`system_prompt`), so context is isolated and Milestone 3's gates drop in naturally between stages. CLI flags: `--deploy`, `--max-rounds`, per-role `--*-model`, `--list-runs`, `--show-run`.
 
-**Milestone 2 — Web dashboard, read-only.** Next.js app that lists runs and streams the live agent activity feed over SSE. No interaction yet — just watch it work.
+**Milestone 2 — Web dashboard, read-only. ✅ DONE.** Next.js 14 + TS + Tailwind dashboard at `frontend/`, served alongside a FastAPI app at `backend/app/server.py`. The dashboard lists runs (refresh every 2s), starts new ones via `POST /api/runs`, and tails live progress via `GET /api/runs/{id}/events/stream` (Server-Sent Events). The SSE handler polls SQLite for new event rows past `last_id` — that single design choice means the dashboard tails any run regardless of which process started it (in-process via API or out-of-process via the M1 CLI), and avoids the classic replay-vs-live race window. Next config rewrites `/api/*` to the FastAPI backend so the dashboard speaks to its own origin.
 
 **Milestone 3 — Approval gates.** Wire the three gates: backend pauses, frontend panels for approve/reject/notes, resume on response. This is where it becomes *yours to control*.
 
@@ -159,4 +159,4 @@ Orchestrator-worker multi-agent design · Claude Agent SDK subagents and context
 
 ## 10. Recommended next step
 
-Milestones 0 and 1 are done. The next step is **Milestone 2**: a read-only Next.js dashboard that subscribes to the same `EventBus` the CLI uses (as an SSE listener) and renders the per-run event stream live. SQLite lets it also browse and replay past runs without re-spending tokens.
+Milestones 0, 1, and 2 are done. The next step is **Milestone 3**: approval gates. Three pause-points (spec / code / deploy) where the backend stops the state machine, the dashboard renders an approve/reject/notes panel, and the orchestrator resumes on response. The polling-SSE plumbing from M2 makes this easy — gates emit a `gate_open` event with everything the UI needs, and the orchestrator awaits a future resolved by a new `POST /api/runs/{id}/gate/{name}` endpoint.
