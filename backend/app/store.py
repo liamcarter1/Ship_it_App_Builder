@@ -146,6 +146,14 @@ class Store:
             )
 
 
-def attach_store_to_bus(bus: EventBus, store: Store, run_id: int) -> None:
-    """Convenience: register the store as a listener on the bus."""
-    bus.add(store.make_listener(run_id))
+def attach_store_to_bus(bus: EventBus, store: Store, run_id: int) -> Listener:
+    """Register the store as a listener on the bus.
+
+    Returns the listener so the caller can later `bus.remove(listener)` once
+    the run ends; without that, a long-lived bus would accumulate one stale
+    recorder per past run and silently duplicate every future event into
+    every prior `run_id`.
+    """
+    listener = store.make_listener(run_id)
+    bus.add(listener)
+    return listener

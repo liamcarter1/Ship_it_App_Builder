@@ -54,6 +54,17 @@ from .agents import (
 from .events import EventBus, PipelineEvent
 from .store import Store, attach_store_to_bus
 
+
+class PipelineFailure(RuntimeError):
+    """Expected, user-facing failure raised by a stage.
+
+    The orchestrator records these as `outcome.error` + the right
+    `outcome.status` and lets `run()` return normally, so the CLI can print a
+    clean summary instead of a traceback. Unexpected exceptions (programmer
+    bugs) still propagate.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Stage runner
 # ---------------------------------------------------------------------------
@@ -205,7 +216,9 @@ class Orchestrator:
         workspace.mkdir(parents=True, exist_ok=True)
 
         run_id = self.store.create_run(idea=idea, workspace=workspace)
-        attach_store_to_bus(self.bus, self.store, run_id)
+        # Per-run listener: attach now, detach in `finally` so reusing this
+        # Orchestrator across runs doesn't accumulate stale recorders.
+        store_listener = attach_store_to_bus(self.bus, self.store, run_id)
 
         outcome = RunOutcome(run_id=run_id, idea=idea, workspace=workspace)
 
@@ -218,74 +231,74 @@ class Orchestrator:
             )
         )
 
+        unexpected: Optional[BaseException] = None
         try:
-            spec = await self._stage_planner(idea, outcome)
-            outcome.spec = spec
+            try:
+                spec = await self._stage_planner(idea, outcome)
+                outcome.spec = spec
 
-            await self._stage_scaffolder(workspace, outcome)
+                await self._stage_scaffolder(workspace, outcome)
 
-            await self._stage_coder_initial(spec, workspace, outcome)
+                await self._stage_coder_initial(spec, workspace, outcome)
 
-            verdict = await self._coder_reviewer_loop(spec, workspace, outcome)
-            outcome.last_verdict = verdict
+                verdict = await self._coder_reviewer_loop(spec, workspace, outcome)
+                outcome.last_verdict = verdict
 
-            if verdict.get("verdict") != "pass":
-                outcome.status = "failed_review"
-                outcome.error = (
-                    f"review still failing after {outcome.review_rounds} rounds"
-                )
-            else:
-                page_tsx = workspace / "app" / "page.tsx"
-                outcome.page_tsx_written = page_tsx.exists()
-
-                if self.config.deploy:
-                    deploy = await self._stage_deployer(workspace, outcome)
-                    outcome.deploy = deploy
-                    outcome.status = (
-                        "deployed" if deploy.get("status") == "deployed" else "deploy_failed"
+                if verdict.get("verdict") != "pass":
+                    outcome.status = "failed_review"
+                    outcome.error = (
+                        f"review still failing after {outcome.review_rounds} rounds"
                     )
                 else:
-                    outcome.status = "built"
+                    page_tsx = workspace / "app" / "page.tsx"
+                    outcome.page_tsx_written = page_tsx.exists()
 
-        except Exception as exc:  # surface, don't swallow
-            outcome.status = "errored"
-            outcome.error = f"{type(exc).__name__}: {exc}"
+                    if self.config.deploy:
+                        deploy = await self._stage_deployer(workspace, outcome)
+                        outcome.deploy = deploy
+                        outcome.status = (
+                            "deployed" if deploy.get("status") == "deployed" else "deploy_failed"
+                        )
+                    else:
+                        outcome.status = "built"
+
+            except PipelineFailure as exc:
+                # Expected, user-facing failure (e.g. Planner couldn't return a
+                # valid spec, Scaffolder couldn't produce a project). Record it
+                # and return cleanly — the CLI prints the summary from
+                # outcome.error rather than a Python traceback.
+                outcome.status = outcome.status if outcome.status != "running" else "errored"
+                outcome.error = str(exc)
+            except Exception as exc:  # programmer error / unknown — surface
+                outcome.status = "errored"
+                outcome.error = f"{type(exc).__name__}: {exc}"
+                unexpected = exc
+
             await self.bus.emit(
                 PipelineEvent(
                     kind="pipeline_end",
                     source="orchestrator",
-                    text=outcome.error,
-                    meta={"is_error": True},
+                    text=outcome.error or outcome.status,
+                    meta={
+                        "is_error": outcome.status not in ("built", "deployed"),
+                        "total_cost_usd": outcome.total_cost_usd,
+                        "review_rounds": outcome.review_rounds,
+                        "deploy_url": (outcome.deploy or {}).get("url"),
+                    },
                 )
             )
             self.store.finish_run(
                 run_id,
                 status=outcome.status,
                 total_cost_usd=outcome.total_cost_usd,
+                deploy_url=(outcome.deploy or {}).get("url"),
                 error=outcome.error,
             )
-            raise
+        finally:
+            self.bus.remove(store_listener)
 
-        await self.bus.emit(
-            PipelineEvent(
-                kind="pipeline_end",
-                source="orchestrator",
-                text=outcome.status,
-                meta={
-                    "is_error": outcome.status not in ("built", "deployed"),
-                    "total_cost_usd": outcome.total_cost_usd,
-                    "review_rounds": outcome.review_rounds,
-                    "deploy_url": (outcome.deploy or {}).get("url"),
-                },
-            )
-        )
-        self.store.finish_run(
-            run_id,
-            status=outcome.status,
-            total_cost_usd=outcome.total_cost_usd,
-            deploy_url=(outcome.deploy or {}).get("url"),
-            error=outcome.error,
-        )
+        if unexpected is not None:
+            raise unexpected
         return outcome
 
     # --- stage implementations --------------------------------------------
@@ -298,7 +311,14 @@ class Orchestrator:
         )
         result = await _run_stage(stage="planner", prompt=prompt, options=options, bus=self.bus)
         self._add_cost(outcome, "planner", result)
-        spec = parse_planner_spec(result.text)
+        try:
+            spec = parse_planner_spec(result.text)
+        except ValueError as exc:
+            # ValueError covers both "no JSON block" and json.JSONDecodeError.
+            outcome.status = "failed_planner"
+            raise PipelineFailure(
+                f"planner did not return a valid JSON spec: {exc}"
+            ) from exc
         return spec
 
     async def _stage_scaffolder(self, workspace: Path, outcome: RunOutcome) -> None:
@@ -313,9 +333,15 @@ class Orchestrator:
         # Sanity-check the scaffolder actually produced a project.
         for needed in ("package.json", "tsconfig.json", "app/page.tsx", "app/layout.tsx"):
             if not (workspace / needed).exists():
-                raise RuntimeError(f"scaffolder did not produce {needed}; saw: {result.text[-300:]}")
+                outcome.status = "failed_scaffold"
+                raise PipelineFailure(
+                    f"scaffolder did not produce {needed}; saw: {result.text[-300:]}"
+                )
         if "SCAFFOLD_FAILED" in result.text:
-            raise RuntimeError(f"scaffolder reported failure: {result.text[-300:]}")
+            outcome.status = "failed_scaffold"
+            raise PipelineFailure(
+                f"scaffolder reported failure: {result.text[-300:]}"
+            )
 
     async def _stage_coder_initial(
         self, spec: dict, workspace: Path, outcome: RunOutcome
@@ -361,6 +387,16 @@ class Orchestrator:
         for round_num in range(1, self.config.max_review_rounds + 1):
             outcome.review_rounds = round_num
             verdict = await self._stage_reviewer(workspace, outcome)
+            if verdict.get("_parse_error"):
+                # The Reviewer's output couldn't be parsed; we have no real
+                # build verdict to react to. Looping here would feed the
+                # parse-error blob to the Coder as a fake "build issue" and
+                # waste up to 2*max_review_rounds extra model calls per cap.
+                outcome.status = "failed_review"
+                raise PipelineFailure(
+                    "reviewer did not return a parseable JSON verdict; "
+                    "aborting before fake-issue revision loop"
+                )
             if verdict.get("verdict") == "pass":
                 return verdict
             if round_num == self.config.max_review_rounds:

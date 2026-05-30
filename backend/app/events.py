@@ -54,6 +54,19 @@ class EventBus:
     def add(self, listener: Listener) -> None:
         self._listeners.append(listener)
 
+    def remove(self, listener: Listener) -> None:
+        """Detach a listener. No-op if it isn't currently attached.
+
+        Callers that add per-run listeners (e.g. the SQLite recorder bound to
+        a specific run_id) must remove them when the run ends — otherwise
+        long-lived bus instances accumulate stale listeners that write each
+        future event to every past run_id.
+        """
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
+
     async def emit(self, event: PipelineEvent) -> None:
         for listener in self._listeners:
             result = listener(event)
