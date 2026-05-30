@@ -165,10 +165,19 @@ None by default, which makes `_gate()` a silent no-op. If you want
 human-in-the-loop runs, start them from the dashboard (or hit
 `POST /api/runs` directly).
 
+A gate that goes unanswered for `OrchestratorConfig.gate_timeout_s`
+(default 1 h) ends the run with `status=expired_at_<name>` and emits a
+`gate_decision` event so the dashboard clears the panel — abandoned
+tabs can't leak orchestrator tasks.
+
 Restart caveat: the broker lives only in process memory. If the FastAPI
 server restarts while a gate is pending, the asyncio task dies with it
 and the run stays as `running` in the DB forever. Restart-resumable
-gates are an M4 concern.
+gates are an M4 concern. **Multi-worker caveat:** the broker is a
+per-process singleton, so a gate opened in one uvicorn worker is
+invisible to a resolve POST landing in another. Run with a single
+worker (`--workers 1`, the default) until M4 swaps the broker for a
+shared backing store.
 
 ## What's next (Milestone 4)
 

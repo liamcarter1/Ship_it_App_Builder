@@ -20,6 +20,7 @@ publisher.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -193,6 +194,10 @@ class OrchestratorConfig:
     # FastAPI server passes a shared broker and the full set.
     gate_broker: Optional[GateBroker] = None
     gated_stages: tuple[str, ...] = ()
+    # Bound how long a gate may wait for a human. Without this, an abandoned
+    # browser tab would leak the orchestrator's asyncio task forever. On
+    # timeout the run ends with `expired_at_<gate>`.
+    gate_timeout_s: float = 3600.0
 
 
 class Orchestrator:
@@ -402,6 +407,12 @@ class Orchestrator:
         """
         if name not in self.config.gated_stages or self.config.gate_broker is None:
             return None
+        # Register the future FIRST, then emit the event. If we emitted first
+        # and the dashboard POSTed a resolve before we got back to register,
+        # the API would 404. The current bus listeners are sync so emit
+        # doesn't actually yield today, but doing it in this order means we
+        # stay safe when M4 adds an async listener (e.g. WebSocket push).
+        future = self.config.gate_broker.open(outcome.run_id, name)
         await self.bus.emit(
             PipelineEvent(
                 kind="gate_open",
@@ -410,8 +421,28 @@ class Orchestrator:
                 meta={"name": name, "payload": payload},
             )
         )
-        future = self.config.gate_broker.open(outcome.run_id, name)
-        decision = await future
+        try:
+            decision = await asyncio.wait_for(future, timeout=self.config.gate_timeout_s)
+        except asyncio.TimeoutError:
+            # No human in the loop within the budget. End the run cleanly
+            # with `expired_at_<name>` so abandoned tabs don't pile up
+            # hanging orchestrator tasks indefinitely.
+            outcome.status = f"expired_at_{name}"
+            await self.bus.emit(
+                PipelineEvent(
+                    kind="gate_decision",
+                    source="orchestrator",
+                    text=name,
+                    meta={
+                        "name": name,
+                        "approve": False,
+                        "notes": f"timeout after {self.config.gate_timeout_s:g}s",
+                    },
+                )
+            )
+            raise PipelineFailure(
+                f"gate '{name}' expired after {self.config.gate_timeout_s:g}s with no decision"
+            )
         await self.bus.emit(
             PipelineEvent(
                 kind="gate_decision",

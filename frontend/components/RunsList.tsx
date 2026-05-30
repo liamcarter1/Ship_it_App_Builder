@@ -3,18 +3,8 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { listRuns } from '@/lib/api';
+import { statusColour } from '@/lib/status';
 import type { RunDTO } from '@/lib/types';
-
-const STATUS_COLOUR: Record<string, string> = {
-  running: 'text-cyan-300 animate-pulse',
-  built: 'text-emerald-300',
-  deployed: 'text-emerald-400',
-  failed_review: 'text-rose-300',
-  failed_planner: 'text-rose-300',
-  failed_scaffold: 'text-rose-300',
-  deploy_failed: 'text-amber-300',
-  errored: 'text-rose-400',
-};
 
 function fmtCost(c: number | null): string {
   return c == null ? '—' : `$${c.toFixed(4)}`;
@@ -84,7 +74,7 @@ export function RunsList() {
                   {r.idea}
                 </Link>
               </td>
-              <td className={`px-3 py-2 ${STATUS_COLOUR[r.status] ?? 'text-zinc-300'}`}>
+              <td className={`px-3 py-2 ${statusColour(r.status)}`}>
                 {r.status}
                 {r.live && <span className="ml-1 text-cyan-400">● live</span>}
               </td>

@@ -4,22 +4,12 @@ import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ActivityStream } from '@/components/ActivityStream';
 import { getRun } from '@/lib/api';
+import { statusColour } from '@/lib/status';
 import type { RunDTO } from '@/lib/types';
 
 interface PageProps {
   params: Promise<{ id: string }>;
 }
-
-const STATUS_COLOUR: Record<string, string> = {
-  running: 'text-cyan-300 animate-pulse',
-  built: 'text-emerald-300',
-  deployed: 'text-emerald-400',
-  failed_review: 'text-rose-300',
-  failed_planner: 'text-rose-300',
-  failed_scaffold: 'text-rose-300',
-  deploy_failed: 'text-amber-300',
-  errored: 'text-rose-400',
-};
 
 export default function RunPage({ params }: PageProps) {
   const { id } = use(params);
@@ -75,7 +65,7 @@ export default function RunPage({ params }: PageProps) {
       <div className="rounded border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
         <h1 className="text-lg text-zinc-100">{run.idea}</h1>
         <div className="flex flex-wrap items-center gap-4 text-sm">
-          <span className={STATUS_COLOUR[run.status] ?? 'text-zinc-300'}>
+          <span className={statusColour(run.status)}>
             {run.status}
             {run.live && <span className="ml-1 text-cyan-400">● live</span>}
           </span>
