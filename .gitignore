@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+
+# Node (for the future Next.js frontend + generated apps)
+node_modules/
+.next/
+out/
+dist/
+.vercel
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Ship-It workspaces (generated app output)
+generated_app/
+workspaces/
+
+# SQLite (Milestone 1)
+*.db
+*.sqlite
+*.sqlite3
