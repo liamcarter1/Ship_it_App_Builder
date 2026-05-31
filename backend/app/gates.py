@@ -1,13 +1,9 @@
-"""GateBroker — coordinates human-in-the-loop approval pauses.
+"""GateBroker — DB-backed coordination for human-in-the-loop approval pauses.
 
-Single in-process broker. Each gate is keyed by `(run_id, name)`; the
-orchestrator calls `open()` to register and await a decision, the API
-calls `resolve()` to unblock it.
-
-If the server restarts while a gate is pending, the asyncio task running
-the orchestrator dies and the run is effectively orphaned (stays
-"running" in the DB forever). Restart-resumable gates are a Milestone 4
-concern; for M3 the broker lives only in process memory.
+Gate state lives in the `gates` table (via `Store`), not in process memory, so
+it survives a server restart and is visible across workers. The orchestrator
+`wait()`s for a decision by polling the table — the same mechanism the SSE
+event stream uses. The API `resolve()`s a gate by writing the decision.
 
 The CLI keeps its M1/M2 behaviour: `OrchestratorConfig.gate_broker=None`
 short-circuits `_gate()` to auto-approve.
@@ -18,6 +14,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
+from .store import Store
+
 
 @dataclass(frozen=True)
 class GateDecision:
@@ -26,50 +24,40 @@ class GateDecision:
 
 
 class GateBroker:
-    """Maps `(run_id, name)` to an `asyncio.Future[GateDecision]`."""
+    """Async wrapper over the `gates` table."""
 
-    def __init__(self) -> None:
-        self._pending: dict[tuple[int, str], asyncio.Future[GateDecision]] = {}
+    def __init__(self, store: Store, *, poll_interval: float = 0.25) -> None:
+        self._store = store
+        self._poll_interval = poll_interval
 
-    def open(self, run_id: int, name: str) -> asyncio.Future[GateDecision]:
-        """Register a new pending gate and return its future. Replaces any
-        stale future under the same key (shouldn't happen in normal flow)."""
-        key = (run_id, name)
-        old = self._pending.pop(key, None)
-        if old is not None and not old.done():
-            old.cancel()
+    def open(self, run_id: int, name: str, *, payload: Optional[dict] = None) -> None:
+        self._store.open_gate(run_id, name, payload=payload)
+
+    async def wait(self, run_id: int, name: str, *, timeout: float) -> GateDecision:
+        """Poll until the gate is decided; raise asyncio.TimeoutError past
+        `timeout`. Uses the loop's monotonic clock so it's immune to wall-clock
+        jumps."""
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[GateDecision] = loop.create_future()
-        self._pending[key] = future
-        return future
+        deadline = loop.time() + timeout
+        while True:
+            gate = self._store.get_gate(run_id, name)
+            if gate is not None and gate["status"] != "open":
+                return GateDecision(
+                    approve=(gate["status"] == "approved"),
+                    notes=gate["notes"],
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.sleep(min(self._poll_interval, remaining))
 
     def resolve(self, run_id: int, name: str, decision: GateDecision) -> bool:
-        """Return True if a pending gate was resolved, False if there was
-        no matching future (already resolved, never opened, or wrong key)."""
-        key = (run_id, name)
-        future = self._pending.pop(key, None)
-        if future is None or future.done():
-            return False
-        future.set_result(decision)
-        return True
+        return self._store.resolve_gate(
+            run_id, name, approve=decision.approve, notes=decision.notes
+        )
 
     def cancel_all(self, run_id: int, *, notes: Optional[str] = None) -> list[str]:
-        """Reject every pending gate for a run with `approve=False`.
-        Returns the names cancelled. Used by `POST /api/runs/{id}/cancel`."""
-        names: list[str] = []
-        for key in list(self._pending.keys()):
-            rid, name = key
-            if rid != run_id:
-                continue
-            future = self._pending.pop(key)
-            if not future.done():
-                future.set_result(GateDecision(approve=False, notes=notes or "cancelled"))
-            names.append(name)
-        return names
+        return self._store.cancel_open_gates(run_id, notes=notes)
 
     def pending_for(self, run_id: int) -> list[str]:
-        return [
-            name
-            for (rid, name), fut in self._pending.items()
-            if rid == run_id and not fut.done()
-        ]
+        return self._store.pending_gates(run_id)
