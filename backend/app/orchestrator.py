@@ -221,6 +221,18 @@ class Orchestrator:
             outcome.per_stage_cost[stage] = result.cost_usd
             outcome.total_cost_usd += result.cost_usd
 
+    def _config_dict(self) -> dict:
+        c = self.config
+        return {
+            "deploy": c.deploy,
+            "max_review_rounds": c.max_review_rounds,
+            "planner_model": c.planner_model,
+            "scaffolder_model": c.scaffolder_model,
+            "coder_model": c.coder_model,
+            "reviewer_model": c.reviewer_model,
+            "deployer_model": c.deployer_model,
+        }
+
     # --- main entrypoint ---------------------------------------------------
 
     async def run(self, idea: str, *, workspace: Optional[Path] = None, run_id: Optional[int] = None) -> RunOutcome:
@@ -232,7 +244,9 @@ class Orchestrator:
         # dashboard can open the SSE stream immediately). The CLI path
         # passes run_id=None and we create the row here.
         if run_id is None:
-            run_id = self.store.create_run(idea=idea, workspace=workspace)
+            run_id = self.store.create_run(
+                idea=idea, workspace=workspace, config=self._config_dict()
+            )
         # Per-run listener: attach now, detach in `finally` so reusing this
         # Orchestrator across runs doesn't accumulate stale recorders.
         store_listener = attach_store_to_bus(self.bus, self.store, run_id)
@@ -273,37 +287,9 @@ class Orchestrator:
                         f"review still failing after {outcome.review_rounds} rounds"
                     )
                 else:
-                    page_tsx = workspace / "app" / "page.tsx"
-                    outcome.page_tsx_written = page_tsx.exists()
-
-                    # Code gate — review the green build + reviewer verdict
-                    # before going further. Always fires (deploy or no), so
-                    # CLI/'built' runs get a final approval too. The diff is
-                    # what the human actually needs to read; we include the
-                    # workspace path as a fallback for power users.
-                    code_payload: dict = {
-                        "workspace": str(workspace),
-                        "verdict": verdict,
-                    }
-                    diff = _compute_workspace_diff(workspace)
-                    if diff is not None:
-                        code_payload["diff"] = diff
-                    await self._gate("code", code_payload, outcome)
-
-                    if self.config.deploy:
-                        # Deploy gate — last chance before pushing to Vercel.
-                        await self._gate(
-                            "deploy",
-                            {"workspace": str(workspace)},
-                            outcome,
-                        )
-                        deploy = await self._stage_deployer(workspace, outcome)
-                        outcome.deploy = deploy
-                        outcome.status = (
-                            "deployed" if deploy.get("status") == "deployed" else "deploy_failed"
-                        )
-                    else:
-                        outcome.status = "built"
+                    await self._finish_after_code_gate(
+                        workspace, outcome, verdict, entry_gate=None
+                    )
 
             except PipelineFailure as exc:
                 # Expected, user-facing failure (e.g. Planner couldn't return a
@@ -327,6 +313,69 @@ class Orchestrator:
                         "total_cost_usd": outcome.total_cost_usd,
                         "review_rounds": outcome.review_rounds,
                         "deploy_url": (outcome.deploy or {}).get("url"),
+                    },
+                )
+            )
+            self.store.finish_run(
+                run_id,
+                status=outcome.status,
+                total_cost_usd=outcome.total_cost_usd,
+                deploy_url=(outcome.deploy or {}).get("url"),
+                error=outcome.error,
+            )
+        finally:
+            self.bus.remove(store_listener)
+
+        if unexpected is not None:
+            raise unexpected
+        return outcome
+
+    async def resume_tail(self, run_id: int, *, from_gate: str) -> RunOutcome:
+        """Continue a run that was paused at the code/deploy gate when the
+        server died. Reconstructs minimal state from the run row; `self.config`
+        is supplied by the caller (built from the persisted run config)."""
+        run_row = self.store.get_run(run_id)
+        if run_row is None:
+            raise ValueError(f"run {run_id} not found")
+        workspace = Path(run_row["workspace"])
+        outcome = RunOutcome(run_id=run_id, idea=run_row["idea"], workspace=workspace)
+        outcome.total_cost_usd = run_row["total_cost_usd"] or 0.0
+
+        store_listener = attach_store_to_bus(self.bus, self.store, run_id)
+        unexpected: Optional[BaseException] = None
+        try:
+            await self.bus.emit(
+                PipelineEvent(
+                    kind="pipeline_resumed",
+                    source="orchestrator",
+                    text=f"run #{run_id} resumed at gate {from_gate!r}",
+                    meta={"run_id": run_id, "from_gate": from_gate},
+                )
+            )
+            try:
+                await self._finish_after_code_gate(
+                    workspace, outcome, None, entry_gate=from_gate
+                )
+            except PipelineFailure as exc:
+                outcome.status = (
+                    outcome.status if outcome.status != "running" else "errored"
+                )
+                outcome.error = str(exc)
+            except Exception as exc:
+                outcome.status = "errored"
+                outcome.error = f"{type(exc).__name__}: {exc}"
+                unexpected = exc
+
+            await self.bus.emit(
+                PipelineEvent(
+                    kind="pipeline_end",
+                    source="orchestrator",
+                    text=outcome.error or outcome.status,
+                    meta={
+                        "is_error": outcome.status not in ("built", "deployed"),
+                        "total_cost_usd": outcome.total_cost_usd,
+                        "deploy_url": (outcome.deploy or {}).get("url"),
+                        "resumed": True,
                     },
                 )
             )
@@ -399,8 +448,51 @@ class Orchestrator:
         result = await _run_stage(stage="coder", prompt=prompt, options=options, bus=self.bus)
         self._add_cost(outcome, "coder", result)
 
+    async def _finish_after_code_gate(
+        self,
+        workspace: Path,
+        outcome: RunOutcome,
+        verdict: Optional[dict],
+        *,
+        entry_gate: Optional[str] = None,
+    ) -> None:
+        """The pipeline tail from the code gate onward. Shared by `run()`
+        (entry_gate=None, fresh) and `resume_tail()` (entry_gate in
+        {'code','deploy'}, where the gate row is already open).
+        """
+        do_code = entry_gate in (None, "code")
+        code_reopen = entry_gate is None
+        if do_code:
+            if code_reopen:
+                outcome.page_tsx_written = (workspace / "app" / "page.tsx").exists()
+                payload: dict = {"workspace": str(workspace), "verdict": verdict}
+                diff = _compute_workspace_diff(workspace)
+                if diff is not None:
+                    payload["diff"] = diff
+            else:
+                payload = {}
+            await self._gate("code", payload, outcome, reopen=code_reopen)
+
+        if self.config.deploy:
+            deploy_reopen = entry_gate != "deploy"
+            await self._gate(
+                "deploy", {"workspace": str(workspace)}, outcome, reopen=deploy_reopen
+            )
+            deploy = await self._stage_deployer(workspace, outcome)
+            outcome.deploy = deploy
+            outcome.status = (
+                "deployed" if deploy.get("status") == "deployed" else "deploy_failed"
+            )
+        else:
+            outcome.status = "built"
+
     async def _gate(
-        self, name: str, payload: dict, outcome: RunOutcome
+        self,
+        name: str,
+        payload: dict,
+        outcome: RunOutcome,
+        *,
+        reopen: bool = True,
     ) -> Optional[GateDecision]:
         """Pause for human approval at `name` if configured; otherwise
         return None and continue silently.
@@ -412,22 +504,23 @@ class Orchestrator:
         """
         if name not in self.config.gated_stages or self.config.gate_broker is None:
             return None
-        # Register the future FIRST, then emit the event. If we emitted first
-        # and the dashboard POSTed a resolve before we got back to register,
-        # the API would 404. The current bus listeners are sync so emit
-        # doesn't actually yield today, but doing it in this order means we
-        # stay safe when M4 adds an async listener (e.g. WebSocket push).
-        future = self.config.gate_broker.open(outcome.run_id, name)
-        await self.bus.emit(
-            PipelineEvent(
-                kind="gate_open",
-                source="orchestrator",
-                text=name,
-                meta={"name": name, "payload": payload},
+        # Open the gate row FIRST (DB write), then emit the event, so a fast
+        # resolve POST always finds an open row. On resume the row is already
+        # open (reopen=False): skip the re-open + re-emit and just wait.
+        if reopen:
+            self.config.gate_broker.open(outcome.run_id, name, payload=payload)
+            await self.bus.emit(
+                PipelineEvent(
+                    kind="gate_open",
+                    source="orchestrator",
+                    text=name,
+                    meta={"name": name, "payload": payload},
+                )
             )
-        )
         try:
-            decision = await asyncio.wait_for(future, timeout=self.config.gate_timeout_s)
+            decision = await self.config.gate_broker.wait(
+                outcome.run_id, name, timeout=self.config.gate_timeout_s
+            )
         except asyncio.TimeoutError:
             # No human in the loop within the budget. End the run cleanly
             # with `expired_at_<name>` so abandoned tabs don't pile up
