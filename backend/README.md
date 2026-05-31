@@ -129,6 +129,19 @@ Run it:
 uvicorn app.server:app --reload --port 8000
 ```
 
+**Windows:** use the launcher instead —
+
+```bash
+python run_server.py --port 8000
+```
+
+The Claude Agent SDK spawns the `claude` CLI as a child process, and
+asyncio can only do that on a ProactorEventLoop. `run_server.py` sets the
+Proactor policy *before* uvicorn creates its loop; the bare `uvicorn`
+command can land on a SelectorEventLoop where subprocess spawning fails
+with "CLIConnectionError: Failed to start Claude Code:". (On macOS/Linux
+the launcher is just a thin wrapper, so it's safe everywhere.)
+
 The SSE handler polls SQLite for new rows past the client's last id
 (default ~250 ms). This means it tails any run regardless of which
 process started it — runs from `POST /api/runs` and runs from `python -m
