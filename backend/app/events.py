@@ -26,6 +26,8 @@ EventKind = Literal[
     "deploy_url",
     "gate_open",
     "gate_decision",
+    "pipeline_resumed",
+    "run_interrupted",
     "pipeline_end",
 ]
 
