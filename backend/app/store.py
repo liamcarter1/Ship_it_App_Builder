@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at REAL,
     total_cost_usd REAL,
     deploy_url TEXT,
-    error TEXT
+    error TEXT,
+    config TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -57,6 +58,13 @@ def default_db_path() -> Path:
     )
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns that CREATE TABLE IF NOT EXISTS can't add to existing DBs."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+    if "config" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN config TEXT")
+
+
 @contextmanager
 def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     path = db_path or default_db_path()
@@ -65,6 +73,7 @@ def connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         yield conn
         conn.commit()
     finally:
@@ -77,11 +86,18 @@ class Store:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = db_path or default_db_path()
 
-    def create_run(self, idea: str, workspace: Path) -> int:
+    def create_run(
+        self, idea: str, workspace: Path, *, config: Optional[dict] = None
+    ) -> int:
         with connect(self.db_path) as conn:
             cur = conn.execute(
-                "INSERT INTO runs (idea, workspace, started_at) VALUES (?, ?, ?)",
-                (idea, str(workspace), time.time()),
+                "INSERT INTO runs (idea, workspace, started_at, config) VALUES (?, ?, ?, ?)",
+                (
+                    idea,
+                    str(workspace),
+                    time.time(),
+                    json.dumps(config) if config is not None else None,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -127,6 +143,12 @@ class Store:
     def get_run(self, run_id: int) -> Optional[sqlite3.Row]:
         with connect(self.db_path) as conn:
             return conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+
+    def get_run_config(self, run_id: int) -> dict:
+        row = self.get_run(run_id)
+        if row is None or row["config"] is None:
+            return {}
+        return json.loads(row["config"])
 
     def list_runs(self, limit: int = 20) -> list[sqlite3.Row]:
         with connect(self.db_path) as conn:
