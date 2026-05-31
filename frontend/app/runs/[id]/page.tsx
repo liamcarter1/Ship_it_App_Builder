@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ActivityStream } from '@/components/ActivityStream';
 import { cancelRun, getRun } from '@/lib/api';
@@ -8,12 +8,13 @@ import { statusColour } from '@/lib/status';
 import type { RunDTO } from '@/lib/types';
 
 interface PageProps {
-  params: Promise<{ id: string }>;
+  // Next.js 14: route params are a plain synchronous object (Next 15 makes
+  // them a Promise consumed via React.use(); we're pinned to 14).
+  params: { id: string };
 }
 
 export default function RunPage({ params }: PageProps) {
-  const { id } = use(params);
-  const runId = Number(id);
+  const runId = Number(params.id);
   const [run, setRun] = useState<RunDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
 
