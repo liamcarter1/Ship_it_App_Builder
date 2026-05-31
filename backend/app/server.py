@@ -34,7 +34,22 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
+
+# Load the repo's .env so `uvicorn app.server:app` picks up ANTHROPIC_API_KEY
+# (and any model/CORS overrides) the same way the M1 CLI does. Without this the
+# server starts fine but every run fails at the first query() with an auth
+# error. Search backend/.env first, then the repo-root .env.
+_here = Path(__file__).resolve()
+for _candidate in (_here.parents[1] / ".env", _here.parents[2] / ".env"):
+    if _candidate.exists():
+        load_dotenv(_candidate)
+        break
+else:
+    load_dotenv()
 
 # Windows: the Claude Agent SDK spawns the `claude` CLI as a child process,
 # and asyncio can only spawn subprocesses on a ProactorEventLoop. Some

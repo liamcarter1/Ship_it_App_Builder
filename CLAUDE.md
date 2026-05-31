@@ -183,6 +183,12 @@ These are the things that bite people; respect them when editing:
 
 ## Where to learn the mechanics
 
+[`LEARNING.md`](LEARNING.md) is an annotated walkthrough of how the system fits
+together — the Python-state-machine orchestrator, how each agent fires up via
+`query()`, context isolation, the capped Coder⇄Reviewer loop, the event bus, and
+the asyncio approval gates — with inline `file:line` links into the source and a
+mapping to LangGraph / CrewAI / OpenAI Agents SDK. Start there.
+
 `tutorial/` builds the same concepts up in three runnable, annotated stages
 (single agent → orchestrator+worker → coder/reviewer loop). Point newcomers
 there; it mirrors this codebase's design.
