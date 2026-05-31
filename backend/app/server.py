@@ -31,8 +31,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import sys
 from typing import Optional
+
+# Windows: the Claude Agent SDK spawns the `claude` CLI as a child process,
+# and asyncio can only spawn subprocesses on a ProactorEventLoop. Some
+# uvicorn/Windows configurations run on a SelectorEventLoop, where
+# create_subprocess_exec raises an empty-message NotImplementedError — which
+# the SDK surfaces as "CLIConnectionError: Failed to start Claude Code:".
+# Forcing the Proactor policy at import time (before uvicorn creates its loop)
+# keeps the dashboard's runs working the same way the CLI already does.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+logger = logging.getLogger("shipit.server")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -219,8 +233,10 @@ async def create_run(payload: NewRunPayload):
         except Exception:
             # Unexpected exception — Orchestrator.run() has already recorded
             # outcome.status='errored' in the store before re-raising, so the
-            # dashboard will see the failure via SSE / the runs list.
-            pass
+            # dashboard will see the failure via SSE / the runs list. Log the
+            # full traceback to the server console too, so failures aren't
+            # silently swallowed (the dashboard only shows the short message).
+            logger.exception("run %s failed", run_id)
         finally:
             # Reject any gates still open (the orchestrator should have
             # closed them all, but if it crashed mid-await we don't want
