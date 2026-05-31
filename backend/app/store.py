@@ -46,6 +46,20 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_run_id_idx ON events(run_id, ts);
+
+CREATE TABLE IF NOT EXISTS gates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    notes TEXT,
+    payload TEXT,
+    opened_at REAL NOT NULL,
+    decided_at REAL,
+    UNIQUE(run_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS gates_run_idx ON gates(run_id, status);
 """
 
 
@@ -149,6 +163,85 @@ class Store:
         if row is None or row["config"] is None:
             return {}
         return json.loads(row["config"])
+
+    # --- gates (restart-resumable, DB-backed) ------------------------------
+
+    def open_gate(
+        self, run_id: int, name: str, *, payload: Optional[dict] = None
+    ) -> None:
+        """Register `(run_id, name)` as an open gate. Idempotent while open:
+        re-opening an already-open row is a no-op (resume relies on this)."""
+        payload_json = json.dumps(payload, default=str) if payload is not None else None
+        now = time.time()
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT status FROM gates WHERE run_id=? AND name=?", (run_id, name)
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO gates (run_id, name, status, payload, opened_at) "
+                    "VALUES (?, ?, 'open', ?, ?)",
+                    (run_id, name, payload_json, now),
+                )
+            elif row["status"] != "open":
+                conn.execute(
+                    "UPDATE gates SET status='open', notes=NULL, decided_at=NULL, "
+                    "payload=?, opened_at=? WHERE run_id=? AND name=?",
+                    (payload_json, now, run_id, name),
+                )
+
+    def get_gate(self, run_id: int, name: str) -> Optional[sqlite3.Row]:
+        with connect(self.db_path) as conn:
+            return conn.execute(
+                "SELECT * FROM gates WHERE run_id=? AND name=?", (run_id, name)
+            ).fetchone()
+
+    def resolve_gate(
+        self, run_id: int, name: str, *, approve: bool, notes: Optional[str] = None
+    ) -> bool:
+        """Decide an open gate. Returns True iff a row was 'open' and got
+        flipped (False if missing or already decided)."""
+        with connect(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE gates SET status=?, notes=?, decided_at=? "
+                "WHERE run_id=? AND name=? AND status='open'",
+                (
+                    "approved" if approve else "rejected",
+                    notes,
+                    time.time(),
+                    run_id,
+                    name,
+                ),
+            )
+            return cur.rowcount > 0
+
+    def cancel_open_gates(
+        self, run_id: int, *, notes: Optional[str] = None
+    ) -> list[str]:
+        with connect(self.db_path) as conn:
+            names = [
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM gates WHERE run_id=? AND status='open'", (run_id,)
+                ).fetchall()
+            ]
+            if names:
+                conn.execute(
+                    "UPDATE gates SET status='rejected', notes=?, decided_at=? "
+                    "WHERE run_id=? AND status='open'",
+                    (notes or "cancelled", time.time(), run_id),
+                )
+            return names
+
+    def pending_gates(self, run_id: int) -> list[str]:
+        with connect(self.db_path) as conn:
+            return [
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM gates WHERE run_id=? AND status='open' ORDER BY id",
+                    (run_id,),
+                ).fetchall()
+            ]
 
     def list_runs(self, limit: int = 20) -> list[sqlite3.Row]:
         with connect(self.db_path) as conn:
