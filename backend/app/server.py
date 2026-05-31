@@ -248,9 +248,11 @@ async def stream_events(run_id: int):
                 return
             # If the DB says the run is over but we somehow didn't see
             # pipeline_end (older row, manual edit), do one trailing poll
-            # then stop instead of polling forever.
+            # then stop instead of polling forever. 'resuming' is NOT
+            # terminal — a run claimed by the startup sweep is mid-resume and
+            # will still emit pipeline_resumed/pipeline_end, so keep streaming.
             current = _store.get_run(run_id)
-            if current is not None and current["status"] not in (None, "running"):
+            if current is not None and current["status"] not in (None, "running", "resuming"):
                 trailing = _store.list_events_after(run_id, last_id)
                 for r in trailing:
                     payload = _event_row_to_dict(r)
