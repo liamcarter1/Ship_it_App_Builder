@@ -264,6 +264,87 @@ behaviour is unchanged.
 
 ---
 
+## 8a. Restart-resumable, DB-backed gates (M5)
+
+### The problem
+
+The M3 broker stored each gate as an `asyncio.Future` in process memory. When the
+FastAPI server restarted, those futures vanished. Any run paused at a gate was
+orphaned at `status='running'` with no way to resume — you had to restart it from
+scratch, losing the expensive Coder/Reviewer work already on disk.
+
+### The fix — poll the DB (the same trick as SSE)
+
+The insight is a single line in [`backend/app/gates.py:1-9`](backend/app/gates.py):
+gate state now lives in a **`gates` table** in SQLite, not in process memory. The
+`GateBroker.wait()` method ([`gates.py:36`](backend/app/gates.py)) polls that table
+every ~250ms until the status column changes from `'open'` to `'approved'` or
+`'rejected'`:
+
+```python
+while True:
+    gate = self._store.get_gate(run_id, name)
+    if gate is not None and gate["status"] != "open":
+        return GateDecision(approve=(gate["status"] == "approved"), ...)
+    await asyncio.sleep(self._poll_interval)
+```
+
+This is **exactly the same "poll SQLite" pattern the SSE event stream already
+uses** (which polls the `events` table for new rows past `last_id`). Once you
+have that pattern, restart-durability and multi-worker visibility drop out
+automatically: any process can query the same table and see the current gate
+state, because there is no in-process state to lose.
+
+### Why config had to be persisted too
+
+A resumed orchestrator needs to know whether to deploy and which models to use —
+information that previously lived only in the `OrchestratorConfig` object in RAM.
+Milestone 5 adds a `config TEXT` (JSON) column to the `runs` table
+([`backend/app/store.py:25-35`](backend/app/store.py)), populated when the run
+starts and read back when building the config for `resume_tail`. The column is
+added via an idempotent `ALTER TABLE IF NOT EXISTS` migration in `connect()`, so
+existing DBs upgrade in place.
+
+### Resume vs. interrupt — the startup sweep
+
+On FastAPI startup, `_recover_runs()`
+([`backend/app/server.py:160`](backend/app/server.py)) iterates every run at
+`status='running'` (left there by a dead process) and decides what to do:
+
+- **Code or deploy gate open** → call `Orchestrator.resume_tail`
+  ([`backend/app/orchestrator.py:333`](backend/app/orchestrator.py)), which
+  re-enters the pipeline at the already-open gate. The expensive
+  Coder/Reviewer work is on disk; the remaining tail is a cheap gate-wait
+  plus an optional Deployer call.
+- **Spec gate open, or no gate open at all (died mid-stage)** → mark
+  `'interrupted'`. Spec-gated runs haven't written any code yet (trivial to
+  restart); mid-stage runs died while a `query()` was in flight and cannot
+  be resumed (in-flight agent calls are not replayable — the explicit non-goal).
+
+The claim is atomic: `claim_run_for_resume`
+([`backend/app/store.py:256`](backend/app/store.py)) does an
+`UPDATE runs SET status='resuming' WHERE id=? AND status='running'` and
+returns `True` only if the row was updated. A second worker starting up
+concurrently sees `status='resuming'`, skips the run, and avoids a
+double-resume race.
+
+### New event kinds
+
+`pipeline_resumed` fires at the top of `resume_tail` so the dashboard SSE
+stream knows the run is live again. `run_interrupted` fires for runs that
+cannot be resumed, giving the activity stream a terminal event to display
+([`backend/app/events.py:29-30`](backend/app/events.py)).
+
+### The key lesson
+
+**Replacing an in-memory coordination primitive (a `Future`) with a polled
+DB row** is a recurring pattern in distributed systems. It trades a tiny bit of
+latency (the poll interval) for durability and visibility that are otherwise very
+hard to retrofit. Ship-It already had that pattern for SSE; applying it to gates
+cost almost nothing architecturally and bought a meaningful reliability property.
+
+---
+
 ## 9. The subtlety: every agent file defines *two* builders
 
 `build_planner()` → `AgentDefinition`

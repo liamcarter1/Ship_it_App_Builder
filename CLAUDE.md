@@ -58,9 +58,23 @@ making architectural changes.
   *Cancel run* button while a run is live. `Store.decode_event(row)` is
   the single source of truth for event-row decoding, used by both the
   FastAPI server and the CLI `--show-run` replay.
-- **Remaining hardening:** restart-resumable gates (the broker still
-  lives in process memory; a server restart orphans paused runs at
-  `running`) and a DB-backed broker for multi-worker deployments.
+- **Milestone 5 (DONE):** restart-resumable, DB-backed gates. Gate state
+  moved from in-process `asyncio.Future`s to a new SQLite `gates` table
+  (`id, run_id, name, status, notes, payload, opened_at, decided_at`);
+  `GateBroker` now polls the table every ~250ms for a decision — the same
+  "poll SQLite" trick the SSE event stream already uses, so multi-worker
+  correctness and restart-durability fall out of one mechanism. Run config
+  (deploy flag, `max_review_rounds`, all five `*_model` overrides) is now
+  persisted in a `config` JSON column on `runs` (idempotent `ALTER TABLE`
+  migration) so a resumed run knows how to finish. `Orchestrator.resume_tail`
+  re-enters the pipeline at the gate it died on; a startup sweep
+  `_recover_runs()` in the FastAPI `lifespan` claims every `'running'` run
+  (atomic `UPDATE … WHERE status='running'` guard against double-resume),
+  resumes code/deploy-gated runs via `resume_tail`, and marks spec-gate or
+  mid-stage runs `'interrupted'` (too cheap to bother resuming). Two new
+  event kinds: `pipeline_resumed`, `run_interrupted`. 23 tests in
+  `backend/tests/`. Non-goal: resuming a run that died mid-LLM-stage
+  (in-flight agent calls cannot be replayed).
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.
@@ -81,7 +95,7 @@ When you complete a milestone, update this section and the milestone list in
 │   │   │   └── deployer.py   # Read/Bash: vercel deploy --prod
 │   │   ├── events.py         # PipelineEvent + EventBus
 │   │   ├── store.py          # SQLite Store: runs + events
-│   │   ├── gates.py          # GateBroker + GateDecision (M3)
+│   │   ├── gates.py          # GateBroker + GateDecision, DB-backed (M3+M5)
 │   │   ├── orchestrator.py   # Python state machine driving the stages
 │   │   ├── server.py         # FastAPI app: /api/runs + SSE + gates (M2+M3)
 │   │   └── run_spike.py      # CLI entrypoint (M0+M1)
