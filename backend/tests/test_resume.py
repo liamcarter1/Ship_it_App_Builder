@@ -70,3 +70,12 @@ async def test_resume_tail_deploy(store, tmp_path):
     outcome = await orch.resume_tail(rid, from_gate="deploy")
     assert outcome.status == "deployed"
     assert store.get_run(rid)["deploy_url"] == "https://x.vercel.app"
+
+
+def test_resume_disposition():
+    from app.server import _resume_disposition
+
+    assert _resume_disposition("code") == "resume"
+    assert _resume_disposition("deploy") == "resume"
+    assert _resume_disposition("spec") == "interrupt"
+    assert _resume_disposition(None) == "interrupt"
