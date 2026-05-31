@@ -243,6 +243,42 @@ class Store:
                 ).fetchall()
             ]
 
+    # --- restart recovery --------------------------------------------------
+
+    def running_runs(self) -> list[sqlite3.Row]:
+        with connect(self.db_path) as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM runs WHERE status='running' ORDER BY id"
+                ).fetchall()
+            )
+
+    def claim_run_for_resume(self, run_id: int) -> bool:
+        """Atomically flip a 'running' run to 'resuming'. Returns True only
+        for the caller that won the flip (guards against double-resume)."""
+        with connect(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE runs SET status='resuming' WHERE id=? AND status='running'",
+                (run_id,),
+            )
+            return cur.rowcount > 0
+
+    def reset_stale_resuming(self) -> int:
+        """Return any 'resuming' runs (left by a crash mid-resume) to
+        'running' so the next sweep reconsiders them. Returns the count."""
+        with connect(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE runs SET status='running' WHERE status='resuming'"
+            )
+            return cur.rowcount
+
+    def mark_interrupted(self, run_id: int, *, error: str = "server restarted") -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE runs SET status='interrupted', finished_at=?, error=? WHERE id=?",
+                (time.time(), error, run_id),
+            )
+
     def list_runs(self, limit: int = 20) -> list[sqlite3.Row]:
         with connect(self.db_path) as conn:
             return list(
