@@ -138,9 +138,10 @@ def _replay_run(store: Store, run_id: int) -> int:
     if run["deploy_url"]:
         print(f"# deploy_url={run['deploy_url']}")
     for ev in store.list_events(run_id):
+        decoded = Store.decode_event(ev)
         event = PipelineEvent(
-            kind=ev["kind"], source=ev["source"], text=ev["text"] or "",
-            meta=__import__("json").loads(ev["meta"] or "{}"), ts=ev["ts"],
+            kind=decoded["kind"], source=decoded["source"], text=decoded["text"] or "",
+            meta=decoded["meta"], ts=decoded["ts"],
         )
         _print_event(event)
     return 0

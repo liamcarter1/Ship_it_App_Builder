@@ -81,14 +81,7 @@ def _row_to_dict(row) -> Optional[dict]:
 
 
 def _event_row_to_dict(row) -> dict:
-    return {
-        "id": row["id"],
-        "ts": row["ts"],
-        "kind": row["kind"],
-        "source": row["source"],
-        "text": row["text"],
-        "meta": json.loads(row["meta"] or "{}"),
-    }
+    return Store.decode_event(row)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +178,15 @@ class NewRunPayload(BaseModel):
     idea: str = Field(..., min_length=3, max_length=500)
     max_rounds: int = Field(3, ge=1, le=10)
     deploy: bool = False
+    # Optional per-worker model overrides. Empty / null = SDK default.
+    # Accepts either an alias (e.g. "sonnet", "haiku") or a full model id
+    # (e.g. "claude-haiku-4-5-20251001"). The dashboard's Advanced section
+    # exposes these so cost can be tuned per role.
+    planner_model: Optional[str] = Field(None, max_length=100)
+    scaffolder_model: Optional[str] = Field(None, max_length=100)
+    coder_model: Optional[str] = Field(None, max_length=100)
+    reviewer_model: Optional[str] = Field(None, max_length=100)
+    deployer_model: Optional[str] = Field(None, max_length=100)
 
 
 @app.post("/api/runs")
@@ -206,6 +208,11 @@ async def create_run(payload: NewRunPayload):
                 deploy=payload.deploy,
                 gate_broker=_gate_broker,
                 gated_stages=_GATED_STAGES,
+                planner_model=payload.planner_model or None,
+                scaffolder_model=payload.scaffolder_model or None,
+                coder_model=payload.coder_model or None,
+                reviewer_model=payload.reviewer_model or None,
+                deployer_model=payload.deployer_model or None,
             )
             orchestrator = Orchestrator(bus=bus, store=_store, config=config)
             await orchestrator.run(idea, workspace=workspace, run_id=run_id)

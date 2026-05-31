@@ -27,6 +27,11 @@ export interface NewRunInput {
   idea: string;
   max_rounds?: number;
   deploy?: boolean;
+  planner_model?: string;
+  scaffolder_model?: string;
+  coder_model?: string;
+  reviewer_model?: string;
+  deployer_model?: string;
 }
 
 export async function createRun(input: NewRunInput): Promise<{ run_id: number }> {

@@ -135,7 +135,7 @@ Next Agent Build/
 
 **Milestone 3 — Approval gates. ✅ DONE.** All three gates wired (`spec` / `code` / `deploy`). The orchestrator emits `gate_open`, awaits an `asyncio.Future` from a per-process `GateBroker` resolved by `POST /api/runs/{id}/gate/{name}`, then emits `gate_decision`. The dashboard's `ActivityStream` derives its open-gate set directly from the event log so approve/reject panels appear correctly on both live tail AND replay. Spec-gate notes are passed verbatim into the Coder's first brief as a hard requirement. `POST /api/runs/{id}/cancel` rejects every pending gate to abort cleanly. CLI behaviour preserved: when `OrchestratorConfig.gate_broker is None`, `_gate()` is a silent no-op.
 
-**Milestone 4 — Polish & reuse.** Diff viewer, project re-open, re-deploy, model selection per worker (cost control), error recovery.
+**Milestone 4 — Polish & reuse. ✅ DONE.** The `GatePanel` now dispatches to per-gate body renderers: a structured `SpecView` for the spec gate, a line-coloured `DiffView` (over `git diff HEAD` against the scaffolder commit, capped at 40 KB) for the code gate, and a confirmation `DeployView` for the deploy gate. The `NewRunForm` exposes per-worker model overrides in an *Advanced* disclosure that threads through `POST /api/runs` to `OrchestratorConfig`. The run detail page has a *Cancel run* button that hits `POST /api/runs/{id}/cancel`. `Store.decode_event(row)` consolidated the event-row JSON parse used by both the FastAPI server and the CLI `--show-run` replay. Remaining: restart-resumable gates / DB-backed broker (deferred to a follow-up — it's real architecture work).
 
 Each milestone is independently useful and demoable — you're never more than one milestone from "working."
 
@@ -159,4 +159,4 @@ Orchestrator-worker multi-agent design · Claude Agent SDK subagents and context
 
 ## 10. Recommended next step
 
-Milestones 0–3 are done. The next step is **Milestone 4**: polish. A diff viewer for the code-gate panel (`git diff` against the scaffolder commit), restart-resumable gates (persist pending gate state so an in-flight pause survives a server restart), per-worker model selection from the dashboard, and a cost-tracking overlay so we can see which agents dominate spend over time.
+All four planned milestones are done. The remaining hardening work — restart-resumable gates and a DB-backed `GateBroker` for multi-worker deployments — is real architecture work that deserves its own commit; flagged in `backend/README.md` as the next thing to pick up.

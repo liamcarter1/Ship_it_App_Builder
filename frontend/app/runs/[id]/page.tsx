@@ -3,7 +3,7 @@
 import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ActivityStream } from '@/components/ActivityStream';
-import { getRun } from '@/lib/api';
+import { cancelRun, getRun } from '@/lib/api';
 import { statusColour } from '@/lib/status';
 import type { RunDTO } from '@/lib/types';
 
@@ -41,6 +41,16 @@ export default function RunPage({ params }: PageProps) {
     };
   }, [runId, run?.live]);
 
+  async function handleCancel() {
+    if (!run?.live) return;
+    if (!window.confirm('Cancel this run? Pending gates will be rejected and the run will end as `rejected_at_<gate>`.')) return;
+    try {
+      await cancelRun(runId);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   if (Number.isNaN(runId)) return <p>Invalid run id.</p>;
   if (error)
     return (
@@ -59,7 +69,18 @@ export default function RunPage({ params }: PageProps) {
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
         <Link href="/" className="text-sm text-zinc-500 hover:text-zinc-300">← all runs</Link>
-        <span className="text-xs text-zinc-500">run #{run.id}</span>
+        <div className="flex items-center gap-3">
+          {run.live && (
+            <button
+              type="button"
+              onClick={handleCancel}
+              className="rounded border border-rose-700 hover:bg-rose-950/40 px-2 py-0.5 text-xs text-rose-300"
+            >
+              Cancel run
+            </button>
+          )}
+          <span className="text-xs text-zinc-500">run #{run.id}</span>
+        </div>
       </div>
 
       <div className="rounded border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">

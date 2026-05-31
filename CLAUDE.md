@@ -48,8 +48,19 @@ making architectural changes.
   it on `gate_decision`. `POST /api/runs/{id}/cancel` rejects every
   pending gate, aborting the run cleanly. CLI keeps M1/M2 behaviour: when
   `OrchestratorConfig.gate_broker is None`, `_gate()` is a silent no-op.
-- **Milestone 4 (next):** polish — diff viewer, model selection per worker,
-  cost dashboards, restart-resumable gates, error recovery.
+- **Milestone 4 (DONE):** polish. The code-gate panel now renders a
+  per-line-coloured `git diff` against the scaffolder commit; the spec
+  gate renders a structured view of the planner spec; the deploy gate
+  renders a confirmation card. `NewRunForm` has an *Advanced* section
+  exposing per-worker model overrides (`planner_model`, `scaffolder_model`,
+  `coder_model`, `reviewer_model`, `deployer_model`) which thread through
+  `POST /api/runs` to `OrchestratorConfig`. The run detail page now has a
+  *Cancel run* button while a run is live. `Store.decode_event(row)` is
+  the single source of truth for event-row decoding, used by both the
+  FastAPI server and the CLI `--show-run` replay.
+- **Remaining hardening:** restart-resumable gates (the broker still
+  lives in process memory; a server restart orphans paused runs at
+  `running`) and a DB-backed broker for multi-worker deployments.
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.

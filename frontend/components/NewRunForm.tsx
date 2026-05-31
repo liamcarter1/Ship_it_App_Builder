@@ -4,11 +4,31 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createRun } from '@/lib/api';
 
+// Five roles in the pipeline; each can take an optional model override.
+// Empty string = SDK default. Accepts both aliases ("sonnet", "haiku") and
+// full model IDs ("claude-haiku-4-5-20251001").
+const MODEL_ROLES = [
+  ['planner_model',    'Planner',    'think-only — cheapest role'],
+  ['scaffolder_model', 'Scaffolder', 'writes config files, runs npm install'],
+  ['coder_model',      'Coder',      'implements the spec'],
+  ['reviewer_model',   'Reviewer',   'runs lint/tsc/build'],
+  ['deployer_model',   'Deployer',   'invokes the Vercel CLI'],
+] as const;
+
+type ModelKey = (typeof MODEL_ROLES)[number][0];
+
 export function NewRunForm() {
   const router = useRouter();
   const [idea, setIdea] = useState('');
   const [maxRounds, setMaxRounds] = useState(3);
   const [deploy, setDeploy] = useState(false);
+  const [models, setModels] = useState<Record<ModelKey, string>>({
+    planner_model: '',
+    scaffolder_model: '',
+    coder_model: '',
+    reviewer_model: '',
+    deployer_model: '',
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -17,7 +37,16 @@ export function NewRunForm() {
     setSubmitting(true);
     setError(null);
     try {
-      const { run_id } = await createRun({ idea: idea.trim(), max_rounds: maxRounds, deploy });
+      // Drop empty model fields so the server uses SDK defaults.
+      const modelOverrides = Object.fromEntries(
+        Object.entries(models).filter(([, v]) => v.trim().length > 0)
+      );
+      const { run_id } = await createRun({
+        idea: idea.trim(),
+        max_rounds: maxRounds,
+        deploy,
+        ...modelOverrides,
+      });
       router.push(`/runs/${run_id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -68,6 +97,35 @@ export function NewRunForm() {
           {submitting ? 'Starting…' : 'Ship it'}
         </button>
       </div>
+
+      <details className="border-t border-zinc-800 pt-3">
+        <summary className="cursor-pointer text-xs uppercase tracking-wide text-zinc-500 hover:text-zinc-300">
+          Advanced — per-worker model overrides
+        </summary>
+        <p className="mt-2 text-xs text-zinc-500">
+          Leave blank for the SDK default. Cheaper models on Planner/Reviewer are the main cost lever.
+          Accepts aliases (<code>sonnet</code>, <code>haiku</code>) or full IDs.
+        </p>
+        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+          {MODEL_ROLES.map(([key, label, hint]) => (
+            <label key={key} className="flex flex-col gap-1 text-sm">
+              <span className="text-zinc-300">
+                {label} <span className="text-zinc-600 text-xs">({hint})</span>
+              </span>
+              <input
+                type="text"
+                value={models[key]}
+                onChange={(e) => setModels((m) => ({ ...m, [key]: e.target.value }))}
+                placeholder="default"
+                maxLength={100}
+                className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-zinc-100
+                           focus:outline-none focus:border-cyan-700"
+              />
+            </label>
+          ))}
+        </div>
+      </details>
+
       {error && <p className="text-sm text-rose-300">Error: {error}</p>}
     </form>
   );

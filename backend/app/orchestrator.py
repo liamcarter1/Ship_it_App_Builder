@@ -278,12 +278,17 @@ class Orchestrator:
 
                     # Code gate — review the green build + reviewer verdict
                     # before going further. Always fires (deploy or no), so
-                    # CLI/'built' runs get a final approval too.
-                    await self._gate(
-                        "code",
-                        {"workspace": str(workspace), "verdict": verdict},
-                        outcome,
-                    )
+                    # CLI/'built' runs get a final approval too. The diff is
+                    # what the human actually needs to read; we include the
+                    # workspace path as a fallback for power users.
+                    code_payload: dict = {
+                        "workspace": str(workspace),
+                        "verdict": verdict,
+                    }
+                    diff = _compute_workspace_diff(workspace)
+                    if diff is not None:
+                        code_payload["diff"] = diff
+                    await self._gate("code", code_payload, outcome)
 
                     if self.config.deploy:
                         # Deploy gate — last chance before pushing to Vercel.
@@ -534,6 +539,34 @@ class Orchestrator:
 # ---------------------------------------------------------------------------
 # Convenience
 # ---------------------------------------------------------------------------
+
+
+def _compute_workspace_diff(workspace: Path, *, max_chars: int = 40_000) -> Optional[str]:
+    """`git diff HEAD` from `workspace`, truncated.
+
+    The scaffolder makes one initial commit (`scaffold`), so `git diff HEAD`
+    is exactly what the Coder added/changed. Capped at 40 KB because the
+    dashboard renders this inline — a runaway diff bricks the panel.
+    Returns None on any subprocess error (we'd rather skip the diff than
+    fail the gate).
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    diff = result.stdout or ""
+    if not diff.strip():
+        return None
+    if len(diff) > max_chars:
+        diff = diff[:max_chars] + f"\n\n... (truncated; {len(diff) - max_chars} more chars omitted)"
+    return diff
 
 
 def default_workspace_root() -> Path:

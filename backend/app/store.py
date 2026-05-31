@@ -155,6 +155,23 @@ class Store:
                 ).fetchall()
             )
 
+    @staticmethod
+    def decode_event(row: sqlite3.Row) -> dict:
+        """Single chokepoint for `events` row -> JSON-ready dict.
+
+        Used by both the FastAPI server (SSE + REST) and the CLI replay path.
+        Keeping it in one place means meta validation, size limits, schema
+        migrations, etc. only need to change here.
+        """
+        return {
+            "id": row["id"],
+            "ts": row["ts"],
+            "kind": row["kind"],
+            "source": row["source"],
+            "text": row["text"],
+            "meta": json.loads(row["meta"] or "{}"),
+        }
+
 
 def attach_store_to_bus(bus: EventBus, store: Store, run_id: int) -> Listener:
     """Register the store as a listener on the bus.
