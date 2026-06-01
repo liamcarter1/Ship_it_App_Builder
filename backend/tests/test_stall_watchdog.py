@@ -171,10 +171,12 @@ async def test_second_stall_raises_failed_timeout(monkeypatch, tmp_path):
 class _DummyOutcome:
     """Minimal stand-in for RunOutcome for stage-method unit calls."""
     run_id = 1
-    per_stage_cost: dict = {}
     total_cost_usd = 0.0
     status = "running"
     page_tsx_written = False
+
+    def __init__(self):
+        self.per_stage_cost: dict = {}
 
 
 async def test_build_stages_get_longer_idle(monkeypatch, tmp_path):
@@ -196,8 +198,20 @@ async def test_build_stages_get_longer_idle(monkeypatch, tmp_path):
 
     monkeypatch.setattr(orch, "_run_stage_with_retry", capture)
 
+    # Non-build stage: standard window.
     await orch._stage_coder_initial({"name": "x"}, tmp_path, _DummyOutcome())
     assert seen["coder"] == 111.0
+
+    # Build stage: longer window. The scaffolder method runs sanity checks
+    # AFTER the (captured) stage call and will raise PipelineFailure because
+    # the tmp workspace has no real Next.js project — we only care that the
+    # build idle window was selected, which is recorded before that raise.
+    from app.orchestrator import PipelineFailure
+    try:
+        await orch._stage_scaffolder(tmp_path, _DummyOutcome())
+    except PipelineFailure:
+        pass
+    assert seen["scaffolder"] == 222.0
 
 
 def test_config_dict_roundtrips_timeouts(tmp_path):
