@@ -34,6 +34,9 @@ class FakeAgen:
 
     async def __anext__(self):
         while self._script:
+            # The sleep item is popped before sleeping, so a cancelled sleep
+            # loses that item — scripts with items after a hang value won't
+            # resume from where they left off.
             item = self._script.pop(0)
             if isinstance(item, (int, float)):
                 await asyncio.sleep(item)
@@ -78,16 +81,16 @@ async def test_run_stage_idle_clock_resets_then_trips(monkeypatch):
 
 
 async def test_run_stage_total_backstop_trips(monkeypatch):
-    # Trickle a message every 0.02s forever: idle never trips (0.05s window),
-    # but the 0.1s total backstop must fire.
+    # Trickle a message every 0.01s forever: idle never trips (0.10s window),
+    # but the 0.15s total backstop must fire.
     script = []
     for _ in range(100):
-        script += [0.02, _FakeResult()]
+        script += [0.01, _FakeResult()]
     agen = _patch_query(monkeypatch, FakeAgen(script))
     with pytest.raises(StageTimeout) as ei:
         await _run_stage(
             stage="coder", prompt="p", options=None, bus=EventBus(),
-            idle_timeout_s=0.05, total_timeout_s=0.1,
+            idle_timeout_s=0.10, total_timeout_s=0.15,
         )
     assert ei.value.kind == "total"
     assert agen.closed is True
