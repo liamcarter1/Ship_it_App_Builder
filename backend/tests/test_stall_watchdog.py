@@ -157,3 +157,57 @@ async def test_second_stall_raises_failed_timeout(monkeypatch, tmp_path):
             idle_timeout_s=1.0, total_timeout_s=2.0,
         )
     assert "failed_coder_timeout" in str(ei.value)
+    kinds = [e.kind for e in events]
+    assert "stage_stalled" in kinds
+    assert "stage_retry" in kinds
+    assert not isinstance(ei.value, orch_mod.StageTimeout)
+
+
+# ---------------------------------------------------------------------------
+# Timeout config + per-stage idle selector tests
+# ---------------------------------------------------------------------------
+
+
+class _DummyOutcome:
+    """Minimal stand-in for RunOutcome for stage-method unit calls."""
+    run_id = 1
+    per_stage_cost: dict = {}
+    total_cost_usd = 0.0
+    status = "running"
+    page_tsx_written = False
+
+
+async def test_build_stages_get_longer_idle(monkeypatch, tmp_path):
+    """Scaffolder/Reviewer (which run npm install/build) use the build idle
+    window; other stages use the standard one."""
+    bus, _ = _capturing_bus()
+    cfg = OrchestratorConfig(
+        stage_idle_timeout_s=111.0,
+        stage_idle_timeout_build_s=222.0,
+    )
+    orch = Orchestrator(bus=bus, store=Store(db_path=tmp_path / "t.db"), config=cfg)
+
+    seen = {}
+
+    async def capture(*, stage, prompt, options, bus, idle_timeout_s, total_timeout_s):
+        seen[stage] = idle_timeout_s
+        from app.orchestrator import StageResult
+        return StageResult(text="{}")
+
+    monkeypatch.setattr(orch, "_run_stage_with_retry", capture)
+
+    await orch._stage_coder_initial({"name": "x"}, tmp_path, _DummyOutcome())
+    assert seen["coder"] == 111.0
+
+
+def test_config_dict_roundtrips_timeouts(tmp_path):
+    cfg = OrchestratorConfig(
+        stage_idle_timeout_s=11.0,
+        stage_idle_timeout_build_s=22.0,
+        stage_total_timeout_s=33.0,
+    )
+    orch = Orchestrator(bus=EventBus(), store=Store(db_path=tmp_path / "t.db"), config=cfg)
+    d = orch._config_dict()
+    assert d["stage_idle_timeout_s"] == 11.0
+    assert d["stage_idle_timeout_build_s"] == 22.0
+    assert d["stage_total_timeout_s"] == 33.0

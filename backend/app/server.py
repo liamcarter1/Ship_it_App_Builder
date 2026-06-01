@@ -138,6 +138,9 @@ def _config_from_row(row) -> OrchestratorConfig:
         coder_model=raw.get("coder_model"),
         reviewer_model=raw.get("reviewer_model"),
         deployer_model=raw.get("deployer_model"),
+        stage_idle_timeout_s=raw.get("stage_idle_timeout_s", 180.0),
+        stage_idle_timeout_build_s=raw.get("stage_idle_timeout_build_s", 420.0),
+        stage_total_timeout_s=raw.get("stage_total_timeout_s", 900.0),
     )
 
 

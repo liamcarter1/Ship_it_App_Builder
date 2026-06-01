@@ -267,6 +267,13 @@ class OrchestratorConfig:
     # browser tab would leak the orchestrator's asyncio task forever. On
     # timeout the run ends with `expired_at_<gate>`.
     gate_timeout_s: float = 3600.0
+    # Inactivity watchdog (in-stage). A stage that emits no SDK message for
+    # `stage_idle_timeout_s` (or `_build_s` for npm-running stages) — or runs
+    # past `stage_total_timeout_s` total — is treated as stalled, killed, and
+    # retried once with a nudge before failing as `failed_<stage>_timeout`.
+    stage_idle_timeout_s: float = 180.0
+    stage_idle_timeout_build_s: float = 420.0
+    stage_total_timeout_s: float = 900.0
 
 
 class Orchestrator:
@@ -300,6 +307,9 @@ class Orchestrator:
             "coder_model": c.coder_model,
             "reviewer_model": c.reviewer_model,
             "deployer_model": c.deployer_model,
+            "stage_idle_timeout_s": c.stage_idle_timeout_s,
+            "stage_idle_timeout_build_s": c.stage_idle_timeout_build_s,
+            "stage_total_timeout_s": c.stage_total_timeout_s,
         }
 
     # --- main entrypoint ---------------------------------------------------
@@ -464,6 +474,15 @@ class Orchestrator:
 
     # --- stage runner with retry -------------------------------------------
 
+    _BUILD_STAGES = ("scaffolder", "reviewer")
+
+    def _idle_for(self, stage: str) -> float:
+        """Build-running stages (npm install/build hold the Bash tool open
+        with zero SDK messages for minutes) get the longer idle window."""
+        if stage in self._BUILD_STAGES:
+            return self.config.stage_idle_timeout_build_s
+        return self.config.stage_idle_timeout_s
+
     async def _run_stage_with_retry(
         self,
         *,
@@ -521,7 +540,11 @@ class Orchestrator:
             "Idea: " + idea.strip() + "\n\n"
             "Return the JSON spec exactly as described in your system prompt."
         )
-        result = await _run_stage(stage="planner", prompt=prompt, options=options, bus=self.bus)
+        result = await self._run_stage_with_retry(
+            stage="planner", prompt=prompt, options=options, bus=self.bus,
+            idle_timeout_s=self._idle_for("planner"),
+            total_timeout_s=self.config.stage_total_timeout_s,
+        )
         self._add_cost(outcome, "planner", result)
         try:
             spec = parse_planner_spec(result.text)
@@ -539,7 +562,11 @@ class Orchestrator:
             "Scaffold a fresh Next.js + TS + Tailwind project in the current "
             "working directory, following your system prompt. Stop when done."
         )
-        result = await _run_stage(stage="scaffolder", prompt=prompt, options=options, bus=self.bus)
+        result = await self._run_stage_with_retry(
+            stage="scaffolder", prompt=prompt, options=options, bus=self.bus,
+            idle_timeout_s=self._idle_for("scaffolder"),
+            total_timeout_s=self.config.stage_total_timeout_s,
+        )
         self._add_cost(outcome, "scaffolder", result)
 
         # Sanity-check the scaffolder actually produced a project.
@@ -565,7 +592,11 @@ class Orchestrator:
     ) -> None:
         options = build_coder_options(workspace, model=self.config.coder_model)
         prompt = build_coder_brief(spec, gate_notes=gate_notes)
-        result = await _run_stage(stage="coder", prompt=prompt, options=options, bus=self.bus)
+        result = await self._run_stage_with_retry(
+            stage="coder", prompt=prompt, options=options, bus=self.bus,
+            idle_timeout_s=self._idle_for("coder"),
+            total_timeout_s=self.config.stage_total_timeout_s,
+        )
         self._add_cost(outcome, "coder", result)
 
     async def _finish_after_code_gate(
@@ -686,7 +717,11 @@ class Orchestrator:
             "Run the three checks in order, then return the JSON verdict "
             "exactly as your system prompt specifies."
         )
-        result = await _run_stage(stage="reviewer", prompt=prompt, options=options, bus=self.bus)
+        result = await self._run_stage_with_retry(
+            stage="reviewer", prompt=prompt, options=options, bus=self.bus,
+            idle_timeout_s=self._idle_for("reviewer"),
+            total_timeout_s=self.config.stage_total_timeout_s,
+        )
         self._add_cost(outcome, "reviewer", result)
         verdict = parse_reviewer_verdict(result.text)
         await self.bus.emit(
@@ -704,8 +739,10 @@ class Orchestrator:
     ) -> None:
         options = build_coder_options(workspace, model=self.config.coder_model)
         prompt = build_coder_revision_brief(spec, verdict.get("issues", []), round_num)
-        result = await _run_stage(
-            stage=f"coder-r{round_num}", prompt=prompt, options=options, bus=self.bus
+        result = await self._run_stage_with_retry(
+            stage=f"coder-r{round_num}", prompt=prompt, options=options, bus=self.bus,
+            idle_timeout_s=self._idle_for(f"coder-r{round_num}"),
+            total_timeout_s=self.config.stage_total_timeout_s,
         )
         self._add_cost(outcome, f"coder-r{round_num}", result)
 
@@ -739,7 +776,11 @@ class Orchestrator:
             "Deploy this project to Vercel production per your system prompt "
             "and return the JSON result."
         )
-        result = await _run_stage(stage="deployer", prompt=prompt, options=options, bus=self.bus)
+        result = await self._run_stage_with_retry(
+            stage="deployer", prompt=prompt, options=options, bus=self.bus,
+            idle_timeout_s=self._idle_for("deployer"),
+            total_timeout_s=self.config.stage_total_timeout_s,
+        )
         self._add_cost(outcome, "deployer", result)
         parsed = parse_deployer_result(result.text)
         if parsed.get("url"):
