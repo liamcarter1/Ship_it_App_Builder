@@ -91,6 +91,21 @@ class StageTimeout(PipelineFailure):
         super().__init__(f"stage {stage!r} stalled ({kind} timeout)")
 
 
+def _status_from_failure(current_status: str, message: str) -> str:
+    """Map a PipelineFailure to a terminal run status.
+
+    Most stages set `outcome.status = "failed_xxx"` *before* raising, so an
+    already-set status is preserved. The stall watchdog raises
+    `PipelineFailure("failed_<stage>_timeout")` without touching `outcome`
+    (the retry wrapper has no handle to it), so when the status is still
+    "running" we adopt a `failed_*` message as the status; anything else
+    (e.g. a gate rejection message) falls back to the generic "errored".
+    """
+    if current_status != "running":
+        return current_status
+    return message if message.startswith("failed_") else "errored"
+
+
 try:
     import psutil
 except ImportError:  # pragma: no cover - psutil should be installed
@@ -448,7 +463,7 @@ class Orchestrator:
                 # valid spec, Scaffolder couldn't produce a project). Record it
                 # and return cleanly — the CLI prints the summary from
                 # outcome.error rather than a Python traceback.
-                outcome.status = outcome.status if outcome.status != "running" else "errored"
+                outcome.status = _status_from_failure(outcome.status, str(exc))
                 outcome.error = str(exc)
             except Exception as exc:  # programmer error / unknown — surface
                 outcome.status = "errored"
@@ -509,9 +524,7 @@ class Orchestrator:
                     workspace, outcome, None, entry_gate=from_gate
                 )
             except PipelineFailure as exc:
-                outcome.status = (
-                    outcome.status if outcome.status != "running" else "errored"
-                )
+                outcome.status = _status_from_failure(outcome.status, str(exc))
                 outcome.error = str(exc)
             except Exception as exc:
                 outcome.status = "errored"

@@ -271,3 +271,13 @@ def test_kill_process_tree_reaps_descendants():
             parent.kill()
         except Exception:
             pass
+
+
+def test_status_from_failure_promotes_failed_timeout():
+    from app.orchestrator import _status_from_failure
+    # A still-"running" outcome with a failed_* message adopts that message as status.
+    assert _status_from_failure("running", "failed_coder_timeout") == "failed_coder_timeout"
+    # A still-"running" outcome with a non-failed message falls back to "errored".
+    assert _status_from_failure("running", "rejected at gate 'code'") == "errored"
+    # An already-set status is preserved (stage set it before raising).
+    assert _status_from_failure("failed_scaffold", "whatever") == "failed_scaffold"
