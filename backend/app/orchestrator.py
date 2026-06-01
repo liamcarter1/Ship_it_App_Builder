@@ -67,6 +67,21 @@ class PipelineFailure(RuntimeError):
     """
 
 
+class StageTimeout(PipelineFailure):
+    """A stage made no forward progress within its deadline.
+
+    `kind` is "idle" (no SDK message for `idle_timeout_s`) or "total" (the
+    absolute per-attempt wall-clock backstop). Subclasses PipelineFailure so
+    an *unhandled* one (e.g. on the retry) is recorded as a clean terminal
+    outcome rather than a traceback.
+    """
+
+    def __init__(self, *, stage: str, kind: str):
+        self.stage = stage
+        self.kind = kind
+        super().__init__(f"stage {stage!r} stalled ({kind} timeout)")
+
+
 # ---------------------------------------------------------------------------
 # Stage runner
 # ---------------------------------------------------------------------------
@@ -94,57 +109,92 @@ async def _run_stage(
     prompt: str,
     options: ClaudeAgentOptions,
     bus: EventBus,
+    idle_timeout_s: float = 180.0,
+    total_timeout_s: float = 900.0,
 ) -> StageResult:
-    """Run one stage to completion, streaming events into the bus."""
+    """Run one stage to completion, streaming events into the bus.
+
+    Bounded by two deadlines so a hung tool/build/model never stalls the run:
+      * idle  — no new SDK message for `idle_timeout_s` (the true hang signal;
+                a working stage keeps emitting tool_use/tool_result/agent_text).
+      * total — absolute wall-clock backstop per attempt.
+    On either, raise StageTimeout; `aclose()` in `finally` tears down the SDK
+    session + child claude/npm/Bash process on every exit path.
+    """
     await bus.emit(PipelineEvent(kind="stage_start", source=stage))
 
     result = StageResult()
     text_parts: list[str] = []
 
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    text_parts.append(block.text)
-                    await bus.emit(
-                        PipelineEvent(kind="agent_text", source=stage, text=block.text)
-                    )
-                elif isinstance(block, ToolUseBlock):
-                    await bus.emit(
-                        PipelineEvent(
-                            kind="tool_use",
-                            source=stage,
-                            text=block.name,
-                            meta={"tool_use_id": block.id, "input": block.input},
-                        )
-                    )
-        elif isinstance(message, UserMessage):
-            for block in getattr(message, "content", []) or []:
-                if isinstance(block, ToolResultBlock):
-                    await bus.emit(
-                        PipelineEvent(
-                            kind="tool_result",
-                            source="tool",
-                            text=str(block.content)[:500],
-                            meta={
-                                "tool_use_id": block.tool_use_id,
-                                "is_error": bool(block.is_error),
-                            },
-                        )
-                    )
-        elif isinstance(message, SystemMessage):
-            await bus.emit(
-                PipelineEvent(
-                    kind="system",
-                    source="system",
-                    text=str(getattr(message, "subtype", "system")),
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    agen = query(prompt=prompt, options=options)
+    try:
+        while True:
+            try:
+                message = await asyncio.wait_for(
+                    agen.__anext__(), timeout=idle_timeout_s
                 )
-            )
-        elif isinstance(message, ResultMessage):
-            result.cost_usd = getattr(message, "total_cost_usd", None)
-            result.turns = getattr(message, "num_turns", None)
-            result.is_error = bool(getattr(message, "is_error", False))
-            result.raw_result = getattr(message, "result", None)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                raise StageTimeout(stage=stage, kind="idle")
+
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        text_parts.append(block.text)
+                        await bus.emit(
+                            PipelineEvent(kind="agent_text", source=stage, text=block.text)
+                        )
+                    elif isinstance(block, ToolUseBlock):
+                        await bus.emit(
+                            PipelineEvent(
+                                kind="tool_use",
+                                source=stage,
+                                text=block.name,
+                                meta={"tool_use_id": block.id, "input": block.input},
+                            )
+                        )
+            elif isinstance(message, UserMessage):
+                for block in getattr(message, "content", []) or []:
+                    if isinstance(block, ToolResultBlock):
+                        await bus.emit(
+                            PipelineEvent(
+                                kind="tool_result",
+                                source="tool",
+                                text=str(block.content)[:500],
+                                meta={
+                                    "tool_use_id": block.tool_use_id,
+                                    "is_error": bool(block.is_error),
+                                },
+                            )
+                        )
+            elif isinstance(message, SystemMessage):
+                await bus.emit(
+                    PipelineEvent(
+                        kind="system",
+                        source="system",
+                        text=str(getattr(message, "subtype", "system")),
+                    )
+                )
+            elif isinstance(message, ResultMessage):
+                result.cost_usd = getattr(message, "total_cost_usd", None)
+                result.turns = getattr(message, "num_turns", None)
+                result.is_error = bool(getattr(message, "is_error", False))
+                result.raw_result = getattr(message, "result", None)
+
+            if loop.time() - start > total_timeout_s:
+                raise StageTimeout(stage=stage, kind="total")
+    finally:
+        # Tear down the SDK session + any child claude/npm/Bash process on
+        # EVERY exit (success, StageTimeout, or CancelledError from run-cancel).
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
 
     result.text = "\n".join(text_parts).strip()
     await bus.emit(
