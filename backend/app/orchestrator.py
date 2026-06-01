@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -90,6 +91,56 @@ class StageTimeout(PipelineFailure):
         super().__init__(f"stage {stage!r} stalled ({kind} timeout)")
 
 
+try:
+    import psutil
+except Exception:  # pragma: no cover - psutil should be installed
+    psutil = None
+
+try:
+    from claude_agent_sdk._internal.transport.subprocess_cli import (
+        SubprocessCLITransport as _SubprocessCLITransport,
+    )
+except Exception:  # pragma: no cover - SDK internal path moved/renamed
+    _SubprocessCLITransport = None
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Terminate `pid` and all its descendants.
+
+    Windows safety net: when a stalled stage's `claude` CLI is force-killed by
+    the SDK, `TerminateProcess` reaps only that immediate process, orphaning any
+    `npm`/`node`/Bash grandchildren it spawned. psutil walks the tree and kills
+    them too, so a retry doesn't race an orphan against the same workspace.
+    MUST be called while the tree is still intact (before the SDK closes the
+    process), so descendants are still reachable from `pid`.
+    """
+    if psutil is None:
+        return
+    try:
+        parent = psutil.Process(pid)
+    except psutil.Error:
+        return
+    try:
+        victims = parent.children(recursive=True)
+    except psutil.Error:
+        victims = []
+    victims.append(parent)
+    for p in victims:
+        try:
+            p.terminate()
+        except psutil.Error:
+            pass
+    try:
+        _gone, alive = psutil.wait_procs(victims, timeout=3)
+    except psutil.Error:
+        alive = victims
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.Error:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Stage runner
 # ---------------------------------------------------------------------------
@@ -136,7 +187,17 @@ async def _run_stage(
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    agen = query(prompt=prompt, options=options)
+    # Construct the SDK transport ourselves so we hold a handle to THIS stage's
+    # child process (transport._process.pid) and can reap its tree on a stall.
+    # Fall back to letting query() build its own transport when the SDK internal
+    # path moved (import failed) or options is None (unit tests) — pid capture is
+    # then a no-op and we rely on the SDK's own teardown + atexit net.
+    transport = (
+        _SubprocessCLITransport(prompt=prompt, options=options)
+        if (_SubprocessCLITransport is not None and options is not None)
+        else None
+    )
+    agen = query(prompt=prompt, options=options, transport=transport)
     try:
         try:
             while True:
@@ -196,6 +257,12 @@ async def _run_stage(
                 if loop.time() - start > total_timeout_s:
                     raise StageTimeout(stage=stage, kind="total")
         except StageTimeout:
+            # Reap the wedged process tree while it's still intact. On Windows
+            # the SDK's TerminateProcess kills only the immediate claude process,
+            # orphaning npm/node grandchildren — kill the whole tree here.
+            pid = getattr(getattr(transport, "_process", None), "pid", None)
+            if sys.platform == "win32" and pid is not None:
+                _kill_process_tree(pid)
             await bus.emit(
                 PipelineEvent(
                     kind="stage_end",

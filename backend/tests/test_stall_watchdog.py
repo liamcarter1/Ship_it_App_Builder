@@ -225,3 +225,49 @@ def test_config_dict_roundtrips_timeouts(tmp_path):
     assert d["stage_idle_timeout_s"] == 11.0
     assert d["stage_idle_timeout_build_s"] == 22.0
     assert d["stage_total_timeout_s"] == 33.0
+
+
+# ---------------------------------------------------------------------------
+# _kill_process_tree tests
+# ---------------------------------------------------------------------------
+
+
+import subprocess
+import sys as _sys
+
+
+def test_kill_process_tree_reaps_descendants():
+    """_kill_process_tree must kill the target AND its descendants (the whole
+    point on Windows, where TerminateProcess doesn't cascade)."""
+    psutil = pytest.importorskip("psutil")
+    from app.orchestrator import _kill_process_tree
+
+    # Parent process spawns a child; both sleep. Parent prints the child PID.
+    code = (
+        "import subprocess, sys, time;"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+        "print(c.pid, flush=True);"
+        "time.sleep(60)"
+    )
+    parent = subprocess.Popen(
+        [_sys.executable, "-c", code], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        child_pid = int(parent.stdout.readline().strip())
+        procs = [psutil.Process(parent.pid)]
+        try:
+            procs.append(psutil.Process(child_pid))
+        except psutil.NoSuchProcess:
+            pass
+
+        _kill_process_tree(parent.pid)
+
+        gone, alive = psutil.wait_procs(procs, timeout=5)
+        assert not alive, f"processes survived tree-kill: {alive}"
+        parent.wait(timeout=5)
+        assert parent.returncode is not None
+    finally:
+        try:
+            parent.kill()
+        except Exception:
+            pass
