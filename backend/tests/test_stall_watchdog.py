@@ -4,7 +4,8 @@ import pytest
 
 import app.orchestrator as orch_mod
 from app.events import EventBus
-from app.orchestrator import StageTimeout, _run_stage
+from app.orchestrator import NUDGE_PREFIX, Orchestrator, OrchestratorConfig, StageTimeout, _run_stage
+from app.store import Store
 
 
 class _FakeResult:
@@ -94,3 +95,65 @@ async def test_run_stage_total_backstop_trips(monkeypatch):
         )
     assert ei.value.kind == "total"
     assert agen.closed is True
+
+
+# ---------------------------------------------------------------------------
+# _run_stage_with_retry tests
+# ---------------------------------------------------------------------------
+
+
+def _capturing_bus():
+    bus = EventBus()
+    events = []
+    bus.add(lambda e: events.append(e))
+    return bus, events
+
+
+def _orch(bus, tmp_path):
+    return Orchestrator(bus=bus, store=Store(db_path=tmp_path / "t.db"),
+                        config=OrchestratorConfig())
+
+
+async def test_retry_succeeds_after_one_stall(monkeypatch, tmp_path):
+    bus, events = _capturing_bus()
+    orch = _orch(bus, tmp_path)
+    calls = []
+
+    async def fake_run_stage(*, stage, prompt, options, bus, idle_timeout_s, total_timeout_s):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise StageTimeout(stage=stage, kind="idle")
+        from app.orchestrator import StageResult
+        return StageResult(text="ok")
+
+    monkeypatch.setattr(orch_mod, "_run_stage", fake_run_stage)
+
+    result = await orch._run_stage_with_retry(
+        stage="coder", prompt="ORIGINAL", options=None, bus=bus,
+        idle_timeout_s=1.0, total_timeout_s=2.0,
+    )
+
+    assert result.text == "ok"
+    assert len(calls) == 2
+    assert calls[1].startswith(NUDGE_PREFIX)        # retry got the nudge
+    assert "ORIGINAL" in calls[1]                    # original brief preserved
+    kinds = [e.kind for e in events]
+    assert kinds.count("stage_stalled") == 1
+    assert kinds.count("stage_retry") == 1
+
+
+async def test_second_stall_raises_failed_timeout(monkeypatch, tmp_path):
+    bus, events = _capturing_bus()
+    orch = _orch(bus, tmp_path)
+
+    async def always_stall(*, stage, prompt, options, bus, idle_timeout_s, total_timeout_s):
+        raise StageTimeout(stage=stage, kind="idle")
+
+    monkeypatch.setattr(orch_mod, "_run_stage", always_stall)
+
+    with pytest.raises(orch_mod.PipelineFailure) as ei:
+        await orch._run_stage_with_retry(
+            stage="coder", prompt="p", options=None, bus=bus,
+            idle_timeout_s=1.0, total_timeout_s=2.0,
+        )
+    assert "failed_coder_timeout" in str(ei.value)

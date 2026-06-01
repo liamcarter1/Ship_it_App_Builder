@@ -28,6 +28,8 @@ EventKind = Literal[
     "gate_decision",
     "pipeline_resumed",
     "run_interrupted",
+    "stage_stalled",
+    "stage_retry",
     "pipeline_end",
 ]
 

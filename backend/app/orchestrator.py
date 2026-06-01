@@ -57,6 +57,14 @@ from .gates import GateBroker, GateDecision
 from .store import Store, attach_store_to_bus
 
 
+NUDGE_PREFIX = (
+    "NOTE: a previous attempt at this stage stalled with no forward progress. "
+    "Do NOT start dev servers, watch-mode, or any long-running or interactive "
+    "command — run only commands that terminate on their own. Work from the "
+    "files already present in the workspace.\n\n"
+)
+
+
 class PipelineFailure(RuntimeError):
     """Expected, user-facing failure raised by a stage.
 
@@ -453,6 +461,57 @@ class Orchestrator:
         if unexpected is not None:
             raise unexpected
         return outcome
+
+    # --- stage runner with retry -------------------------------------------
+
+    async def _run_stage_with_retry(
+        self,
+        *,
+        stage: str,
+        prompt: str,
+        options: ClaudeAgentOptions,
+        bus: EventBus,
+        idle_timeout_s: float,
+        total_timeout_s: float,
+    ) -> StageResult:
+        """Run a stage, and on a stall (StageTimeout) abandon the wedged turn
+        and re-run the stage ONCE fresh with a nudge brief. A second stall is
+        re-raised as a clean PipelineFailure(`failed_<stage>_timeout`).
+
+        This is *retry fresh*, not *resume*: the in-flight turn is discarded
+        (its child process was torn down by `_run_stage`'s `aclose`), and the
+        retry works from the workspace files already on disk.
+        """
+        try:
+            return await _run_stage(
+                stage=stage, prompt=prompt, options=options, bus=bus,
+                idle_timeout_s=idle_timeout_s, total_timeout_s=total_timeout_s,
+            )
+        except StageTimeout as first:
+            await bus.emit(
+                PipelineEvent(
+                    kind="stage_stalled",
+                    source=stage,
+                    text=f"{stage} stalled ({first.kind})",
+                    meta={"timeout_kind": first.kind, "attempt": 1},
+                )
+            )
+            await bus.emit(
+                PipelineEvent(
+                    kind="stage_retry",
+                    source=stage,
+                    text=f"retrying {stage}",
+                    meta={"attempt": 2},
+                )
+            )
+            try:
+                return await _run_stage(
+                    stage=stage, prompt=NUDGE_PREFIX + prompt, options=options,
+                    bus=bus, idle_timeout_s=idle_timeout_s,
+                    total_timeout_s=total_timeout_s,
+                )
+            except StageTimeout:
+                raise PipelineFailure(f"failed_{stage}_timeout")
 
     # --- stage implementations --------------------------------------------
 
