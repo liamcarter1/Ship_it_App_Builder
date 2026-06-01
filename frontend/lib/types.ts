@@ -14,6 +14,8 @@ export type EventKind =
   | 'gate_open'
   | 'gate_decision'
   | 'pipeline_end'
+  | 'stage_stalled'
+  | 'stage_retry'
   | 'stream_end'; // synthetic, emitted by the SSE handler when the run is over
 
 export type GateName = 'spec' | 'code' | 'deploy';

@@ -75,6 +75,18 @@ making architectural changes.
   event kinds: `pipeline_resumed`, `run_interrupted`. 23 tests in
   `backend/tests/`. Non-goal: resuming a run that died mid-LLM-stage
   (in-flight agent calls cannot be replayed).
+- **Hardening (DONE):** in-stage inactivity watchdog. `_run_stage` now bounds
+  every stage with an idle + total wall-clock deadline (`StageTimeout`);
+  `Orchestrator._run_stage_with_retry` abandons a stalled turn, tears down its
+  child process (psutil process-tree kill on Windows, where the SDK's
+  `TerminateProcess` would orphan `npm`/`node` grandchildren), and retries the
+  stage once fresh with a nudge brief before failing as `failed_<stage>_timeout`.
+  Build-running stages (scaffolder, reviewer) get a longer idle window. New
+  events: `stage_stalled`, `stage_retry`. Timeouts live on `OrchestratorConfig`
+  (`stage_idle_timeout_s` / `_build_s` / `stage_total_timeout_s`), persisted in
+  the run `config` JSON. This is *retry fresh*, not *replay* — it fires
+  in-process and does not touch `resume_tail` (mid-LLM-stage resume remains a
+  non-goal).
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.
