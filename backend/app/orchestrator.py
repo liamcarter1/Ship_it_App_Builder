@@ -93,7 +93,7 @@ class StageTimeout(PipelineFailure):
 
 try:
     import psutil
-except Exception:  # pragma: no cover - psutil should be installed
+except ImportError:  # pragma: no cover - psutil should be installed
     psutil = None
 
 try:
@@ -260,6 +260,12 @@ async def _run_stage(
             # Reap the wedged process tree while it's still intact. On Windows
             # the SDK's TerminateProcess kills only the immediate claude process,
             # orphaning npm/node grandchildren — kill the whole tree here.
+            # `transport._process` is assigned in the SDK's connect() (during the
+            # first __anext__, before any message is yielded) and only cleared in
+            # close() — which runs in the outer `finally` AFTER this block — so it
+            # is reliably set here whenever the subprocess actually spawned. The
+            # sole None case is connect() itself stalling before spawn (rare);
+            # that degrades safely to the SDK's own aclose()/atexit teardown.
             pid = getattr(getattr(transport, "_process", None), "pid", None)
             if sys.platform == "win32" and pid is not None:
                 _kill_process_tree(pid)
