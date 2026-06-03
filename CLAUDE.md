@@ -87,6 +87,19 @@ making architectural changes.
   the run `config` JSON. This is *retry fresh*, not *replay* — it fires
   in-process and does not touch `resume_tail` (mid-LLM-stage resume remains a
   non-goal).
+- **Preview-locally (DONE):** the run detail page can launch a finished run's
+  generated app with `npm run dev` and surface a clickable `localhost` link.
+  A `PreviewManager` (`backend/app/preview.py`) owns at most one preview:
+  `start` scans ports 4300–4399 for a free one, spawns the dev server off the
+  event loop (`asyncio.to_thread`), TCP-polls for readiness, and persists the
+  PID/port in a one-row `previews` table; `stop` tears down the process tree.
+  Only `built`/`deployed`/`deploy_failed` runs are previewable. A startup sweep
+  (`_preview.recover()` in `lifespan`) reaps a preview orphaned by a crash, and
+  a background idle reaper stops one after 30 min (`PREVIEW_IDLE_TIMEOUT_S`).
+  Endpoints: `POST/GET/DELETE /api/runs/{id}/preview`; UI in
+  `frontend/components/PreviewPanel.tsx`. The Windows process-tree kill helper
+  moved to shared `backend/app/proc.py` (`kill_process_tree`), used by both the
+  orchestrator watchdog and the preview manager.
 
 When you complete a milestone, update this section and the milestone list in
 `SHIP-IT_BUILD_PLAN.md`.
@@ -106,10 +119,12 @@ When you complete a milestone, update this section and the milestone list in
 │   │   │   ├── reviewer.py   # Read/Bash (read-only): lint/tsc/build verdict
 │   │   │   └── deployer.py   # Read/Bash: vercel deploy --prod
 │   │   ├── events.py         # PipelineEvent + EventBus
-│   │   ├── store.py          # SQLite Store: runs + events
+│   │   ├── store.py          # SQLite Store: runs + events + gates + previews
 │   │   ├── gates.py          # GateBroker + GateDecision, DB-backed (M3+M5)
+│   │   ├── proc.py           # kill_process_tree: shared Windows tree teardown
+│   │   ├── preview.py        # PreviewManager: npm run dev a finished run's app
 │   │   ├── orchestrator.py   # Python state machine driving the stages
-│   │   ├── server.py         # FastAPI app: /api/runs + SSE + gates (M2+M3)
+│   │   ├── server.py         # FastAPI app: /api/runs + SSE + gates + preview
 │   │   └── run_spike.py      # CLI entrypoint (M0+M1)
 │   ├── requirements.txt
 │   ├── shipit.db             # (gitignored) SQLite run/event store
@@ -124,7 +139,8 @@ When you complete a milestone, update this section and the milestone list in
 │   │   ├── RunsList.tsx
 │   │   ├── NewRunForm.tsx
 │   │   ├── ActivityStream.tsx# SSE consumer + open-gate tracker (M2+M3)
-│   │   └── GatePanel.tsx     # approve/reject/notes panel (M3)
+│   │   ├── GatePanel.tsx     # approve/reject/notes panel (M3)
+│   │   └── PreviewPanel.tsx  # start/stop local `npm run dev` preview
 │   ├── lib/{api,types}.ts    # typed fetch + DTOs mirroring PipelineEvent
 │   └── next.config.mjs       # rewrites /api/* -> FastAPI backend
 ├── workspaces/               # (gitignored) per-run generated apps
