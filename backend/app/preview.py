@@ -12,6 +12,7 @@ No real npm is spawned in tests: `_spawn_dev_server`, `_wait_until_ready`, and
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import socket
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 from .proc import kill_process_tree
+
+logger = logging.getLogger("shipit.preview")
 
 PREVIEW_PORT_RANGE = range(4300, 4400)
 PREVIEW_READY_TIMEOUT_S = 30.0
@@ -206,4 +209,9 @@ class PreviewManager:
     async def _reaper_loop(self, interval_s: float) -> None:
         while True:
             await asyncio.sleep(interval_s)
-            await self.reap_idle_once()
+            # Never let an unexpected error kill the loop — that would silently
+            # disable idle auto-stop for the rest of the process lifetime.
+            try:
+                await self.reap_idle_once()
+            except Exception:  # pragma: no cover - defensive safety net
+                logger.exception("idle reaper pass failed; continuing")
