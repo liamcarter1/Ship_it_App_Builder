@@ -267,7 +267,7 @@ class Store:
                 (run_id, pid, port, started_at),
             )
 
-    def get_active_preview(self):
+    def get_active_preview(self) -> Optional[sqlite3.Row]:
         with connect(self.db_path) as conn:
             return conn.execute("SELECT * FROM previews WHERE id=1").fetchone()
 

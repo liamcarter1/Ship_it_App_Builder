@@ -17,5 +17,11 @@ def test_set_get_clear_active_preview(tmp_path):
     row = store.get_active_preview()
     assert row["run_id"] == 9 and row["pid"] == 5555
 
+    # the one-row invariant holds explicitly, not just by read-back
+    from app.store import connect
+
+    with connect(tmp_path / "p.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM previews").fetchone()[0] == 1
+
     store.clear_active_preview()
     assert store.get_active_preview() is None
