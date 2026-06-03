@@ -237,10 +237,10 @@ import sys as _sys
 
 
 def test_kill_process_tree_reaps_descendants():
-    """_kill_process_tree must kill the target AND its descendants (the whole
+    """kill_process_tree must kill the target AND its descendants (the whole
     point on Windows, where TerminateProcess doesn't cascade)."""
     psutil = pytest.importorskip("psutil")
-    from app.orchestrator import _kill_process_tree
+    from app.proc import kill_process_tree
 
     # Parent process spawns a child; both sleep. Parent prints the child PID.
     code = (
@@ -260,7 +260,7 @@ def test_kill_process_tree_reaps_descendants():
         except psutil.NoSuchProcess:
             pass
 
-        _kill_process_tree(parent.pid)
+        kill_process_tree(parent.pid)
 
         gone, alive = psutil.wait_procs(procs, timeout=5)
         assert not alive, f"processes survived tree-kill: {alive}"

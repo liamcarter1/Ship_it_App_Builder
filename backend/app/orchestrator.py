@@ -55,6 +55,7 @@ from .agents import (
 )
 from .events import EventBus, PipelineEvent
 from .gates import GateBroker, GateDecision
+from .proc import kill_process_tree
 from .store import Store, attach_store_to_bus
 
 
@@ -107,53 +108,11 @@ def _status_from_failure(current_status: str, message: str) -> str:
 
 
 try:
-    import psutil
-except ImportError:  # pragma: no cover - psutil should be installed
-    psutil = None
-
-try:
     from claude_agent_sdk._internal.transport.subprocess_cli import (
         SubprocessCLITransport as _SubprocessCLITransport,
     )
 except Exception:  # pragma: no cover - SDK internal path moved/renamed
     _SubprocessCLITransport = None
-
-
-def _kill_process_tree(pid: int) -> None:
-    """Terminate `pid` and all its descendants.
-
-    Windows safety net: when a stalled stage's `claude` CLI is force-killed by
-    the SDK, `TerminateProcess` reaps only that immediate process, orphaning any
-    `npm`/`node`/Bash grandchildren it spawned. psutil walks the tree and kills
-    them too, so a retry doesn't race an orphan against the same workspace.
-    MUST be called while the tree is still intact (before the SDK closes the
-    process), so descendants are still reachable from `pid`.
-    """
-    if psutil is None:
-        return
-    try:
-        parent = psutil.Process(pid)
-    except psutil.Error:
-        return
-    try:
-        victims = parent.children(recursive=True)
-    except psutil.Error:
-        victims = []
-    victims.append(parent)
-    for p in victims:
-        try:
-            p.terminate()
-        except psutil.Error:
-            pass
-    try:
-        _gone, alive = psutil.wait_procs(victims, timeout=3)
-    except psutil.Error:
-        alive = victims
-    for p in alive:
-        try:
-            p.kill()
-        except psutil.Error:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +242,7 @@ async def _run_stage(
             # that degrades safely to the SDK's own aclose()/atexit teardown.
             pid = getattr(getattr(transport, "_process", None), "pid", None)
             if sys.platform == "win32" and pid is not None:
-                _kill_process_tree(pid)
+                kill_process_tree(pid)
             await bus.emit(
                 PipelineEvent(
                     kind="stage_end",
