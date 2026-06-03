@@ -24,6 +24,16 @@ def test_find_free_port_raises_when_range_exhausted():
         _find_free_port(range(0, 0))
 
 
+def test_spawn_wraps_os_error_as_preview_error(tmp_path, monkeypatch):
+    # If the log file can't be opened (here: it's a directory), the OSError
+    # must surface as a clean PreviewError, not an opaque crash. npm resolution
+    # is stubbed so the test is hermetic and never spawns a real process.
+    monkeypatch.setattr(preview, "_resolve_npm", lambda: "npm")
+    (tmp_path / "_preview.log").mkdir()  # open(..., "w") on a dir raises OSError
+    with pytest.raises(PreviewError):
+        preview._spawn_dev_server(tmp_path, 4300)
+
+
 class _FakePopen:
     def __init__(self, pid=4321):
         self.pid = pid

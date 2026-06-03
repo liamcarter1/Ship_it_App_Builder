@@ -79,15 +79,27 @@ def _log_tail(workspace: Path, n: int = 800) -> str:
 
 def _spawn_dev_server(workspace: Path, port: int) -> subprocess.Popen:
     """Spawn `npm run dev -- -p <port>` in `workspace`, logging to
-    `_preview.log`. Returns the Popen handle (its .pid roots the tree we kill)."""
+    `_preview.log`. Returns the Popen handle (its .pid roots the tree we kill).
+
+    Any OS-level failure (log file locked by another process, npm not
+    executable, cwd vanished) is wrapped as PreviewError so the endpoint can
+    surface a clean, actionable message instead of an opaque 500.
+    """
     npm = _resolve_npm()
-    log = open(workspace / "_preview.log", "w", encoding="utf-8")
-    return subprocess.Popen(
-        [npm, "run", "dev", "--", "-p", str(port)],
-        cwd=str(workspace),
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
+    try:
+        log = open(workspace / "_preview.log", "w", encoding="utf-8")
+    except OSError as e:
+        raise PreviewError(f"could not open preview log file: {e}") from e
+    try:
+        return subprocess.Popen(
+            [npm, "run", "dev", "--", "-p", str(port)],
+            cwd=str(workspace),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError as e:
+        log.close()
+        raise PreviewError(f"could not start npm dev server: {e}") from e
 
 
 def _wait_until_ready(
