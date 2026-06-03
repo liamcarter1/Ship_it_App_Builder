@@ -23,9 +23,12 @@ immediately runnable — no install or build step is required to preview it.
 
 ## Scope decisions (from brainstorming)
 
-- **Previewable runs: `built` or `deployed` only.** The button is offered only
-  for runs whose status guarantees the app passed review. Previewing a
-  partially-built `errored`/`interrupted` workspace is out of scope.
+- **Previewable runs: `built`, `deployed`, or `deploy_failed`.** The button is
+  offered only for runs whose status guarantees the app passed the code gate
+  (green local build). `deploy_failed` qualifies — it built successfully and
+  only the subsequent Vercel deploy failed, so its workspace previews fine.
+  Previewing a partially-built `errored`/`interrupted` workspace is out of
+  scope.
 - **One preview at a time.** At most one preview process runs across the whole
   server. Starting a preview for a different run transparently stops the
   current one first. Simplest mental model for a single-user local tool and
@@ -128,8 +131,9 @@ GET    /api/runs/{id}/preview     preview status for this run -> PreviewInfo | {
 DELETE /api/runs/{id}/preview     stop preview for this run -> {stopped: bool}
 ```
 
-- **POST** validates, in order: run exists (404); status ∈ {`built`,`deployed`}
-  (409 with message); `workspace/package.json` and `workspace/node_modules`
+- **POST** validates, in order: run exists (404); status ∈ {`built`,`deployed`,
+  `deploy_failed`} (409 with message); `workspace/package.json` and
+  `workspace/node_modules`
   exist (409 telling the user to run `npm install`). If the *same* run already
   has a live preview, it is idempotent — return the existing `PreviewInfo`
   rather than restarting. If a *different* run is previewing, that one is
@@ -149,7 +153,7 @@ server-side; the client only needs the URL).
 - **`lib/api.ts`:** add `startPreview(runId)`, `getPreview(runId)`,
   `stopPreview(runId)` mirroring the existing typed-fetch helpers.
 - **`components/PreviewPanel.tsx`:** rendered on the run detail page only when
-  `run.status ∈ {built, deployed}`. States:
+  `run.status ∈ {built, deployed, deploy_failed}`. States:
   - *idle:* a **Preview locally** button.
   - *starting:* disabled button + spinner ("Starting preview…").
   - *running:* a clickable `http://localhost:<port>` link (opens new tab) +
@@ -169,7 +173,7 @@ server-side; the client only needs the URL).
 | No free port in 4300–4399 | error "no free preview port available" |
 | Child exits before port opens | error with tail of `_preview.log` |
 | Readiness timeout (~30s) | kill half-started tree, error |
-| Run not `built`/`deployed` | 409, button not shown for these in practice |
+| Run not `built`/`deployed`/`deploy_failed` | 409, button not shown for these in practice |
 | `node_modules` missing | 409 "run npm install in the workspace first" |
 | Start while another run previews | stop the old preview, start the new |
 
@@ -190,8 +194,9 @@ server-side; the client only needs the URL).
 
 Endpoint tests (httpx/ASGI, as in `test_server_recovery.py`):
 
-- 404 for unknown run; 409 for non-built run and for missing `node_modules`;
-  happy-path POST→GET→DELETE with `PreviewManager.start/stop` mocked.
+- 404 for unknown run; 409 for a non-previewable status (e.g. `errored`) and
+  for missing `node_modules`; a `deploy_failed` run is accepted; happy-path
+  POST→GET→DELETE with `PreviewManager.start/stop` mocked.
 
 `subprocess.Popen`, the readiness poll, and `_kill_process_tree` are mocked so
 tests are fast and hermetic.
