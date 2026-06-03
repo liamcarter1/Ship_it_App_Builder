@@ -1,0 +1,109 @@
+"""Local preview of a completed run's generated app.
+
+`PreviewManager` owns at most one `npm run dev` process. It picks a free port,
+spawns the dev server, waits for the port to accept connections, and tracks the
+PID in memory + the store (so a restart can reap an orphan). One preview at a
+time; starting another stops the first. An idle reaper stops a preview after a
+period with no status polls.
+
+No real npm is spawned in tests: `_spawn_dev_server`, `_wait_until_ready`, and
+`kill_process_tree` are monkeypatched.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import socket
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from .proc import kill_process_tree
+
+PREVIEW_PORT_RANGE = range(4300, 4400)
+PREVIEW_READY_TIMEOUT_S = 30.0
+PREVIEW_IDLE_TIMEOUT_S = float(os.environ.get("PREVIEW_IDLE_TIMEOUT_S", "1800"))
+
+
+class PreviewError(Exception):
+    """A preview could not be started (npm missing, no port, never ready)."""
+
+
+@dataclass
+class PreviewInfo:
+    run_id: int
+    pid: int
+    port: int
+    url: str
+    started_at: float
+    last_active: float
+
+
+def _find_free_port(port_range=PREVIEW_PORT_RANGE) -> int:
+    """First port in `port_range` we can bind on localhost. Bind-test then
+    release immediately; the dev server re-binds it a moment later (a tiny TOCTOU
+    window, acceptable for a single-user local tool)."""
+    for port in port_range:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise PreviewError(
+        f"no free preview port available in range "
+        f"{port_range.start}-{port_range.stop - 1}"
+    )
+
+
+def _resolve_npm() -> str:
+    npm = shutil.which("npm")
+    if npm is None:
+        raise PreviewError("npm not found on PATH")
+    return npm
+
+
+def _log_tail(workspace: Path, n: int = 800) -> str:
+    log = workspace / "_preview.log"
+    try:
+        return log.read_text(encoding="utf-8", errors="replace")[-n:]
+    except OSError:
+        return ""
+
+
+def _spawn_dev_server(workspace: Path, port: int) -> subprocess.Popen:
+    """Spawn `npm run dev -- -p <port>` in `workspace`, logging to
+    `_preview.log`. Returns the Popen handle (its .pid roots the tree we kill)."""
+    npm = _resolve_npm()
+    log = open(workspace / "_preview.log", "w", encoding="utf-8")
+    return subprocess.Popen(
+        [npm, "run", "dev", "--", "-p", str(port)],
+        cwd=str(workspace),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def _wait_until_ready(
+    proc: subprocess.Popen,
+    port: int,
+    workspace: Path,
+    timeout: float = PREVIEW_READY_TIMEOUT_S,
+) -> None:
+    """Block until the port accepts a TCP connection, or raise PreviewError if
+    the process exits first or the timeout elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise PreviewError(
+                "preview process exited before becoming ready:\n"
+                + _log_tail(workspace)
+            )
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.25)
+    raise PreviewError(f"preview did not become ready within {timeout:.0f}s")
