@@ -73,6 +73,7 @@ from typing import Literal
 from .events import EventBus, PipelineEvent
 from .gates import GateBroker, GateDecision
 from .orchestrator import Orchestrator, OrchestratorConfig, default_workspace_for_run
+from .preview import PreviewManager, PreviewError, PreviewInfo
 from .store import Store
 
 # One shared store + a registry of in-flight orchestrator tasks (so we can
@@ -83,6 +84,10 @@ _active_runs: dict[int, asyncio.Task] = {}
 # server restart no longer orphans paused runs — the startup sweep
 # (_recover_runs) resumes code/deploy-gated runs and interrupts the rest.
 _gate_broker = GateBroker(_store)
+# One shared preview manager: at most one local `npm run dev` at a time.
+_preview = PreviewManager(_store)
+# Run statuses whose workspace has a green build and is safe to preview.
+_PREVIEWABLE_STATUSES: tuple[str, ...] = ("built", "deployed", "deploy_failed")
 # Set of gate names the server enforces. Order doesn't matter; presence does.
 _GATED_STAGES: tuple[str, ...] = ("spec", "code", "deploy")
 
@@ -93,7 +98,13 @@ _POLL_INTERVAL_S = 0.25
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _recover_runs()
-    yield
+    await _preview.recover()        # reap any preview orphaned by a crash
+    _preview.start_reaper()         # idle auto-stop loop
+    try:
+        yield
+    finally:
+        await _preview.stop_reaper()
+        await _preview.stop()       # don't leave a dev server running on shutdown
 
 
 app = FastAPI(title="Ship-It backend", lifespan=lifespan)
@@ -391,6 +402,64 @@ async def cancel_run(run_id: int):
         raise HTTPException(status_code=404, detail="run not found")
     cancelled = _gate_broker.cancel_all(run_id, notes="cancelled from dashboard")
     return {"cancelled_gates": cancelled}
+
+
+# ---------------------------------------------------------------------------
+# Local preview (run the generated app)
+# ---------------------------------------------------------------------------
+
+
+def _preview_dto(info: PreviewInfo) -> dict:
+    return {
+        "active": True,
+        "run_id": info.run_id,
+        "port": info.port,
+        "url": info.url,
+        "started_at": info.started_at,
+    }
+
+
+@app.post("/api/runs/{run_id}/preview")
+async def start_preview(run_id: int):
+    row = _store.get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if row["status"] not in _PREVIEWABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"run status '{row['status']}' is not previewable",
+        )
+    workspace = Path(row["workspace"])
+    if not (workspace / "package.json").exists() or not (
+        workspace / "node_modules"
+    ).exists():
+        raise HTTPException(
+            status_code=409,
+            detail="workspace has no installed app — run `npm install` in it first",
+        )
+    try:
+        info = await _preview.start(run_id, workspace)
+    except PreviewError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return _preview_dto(info)
+
+
+@app.get("/api/runs/{run_id}/preview")
+async def get_preview(run_id: int):
+    info = _preview.status()
+    if info is None or info.run_id != run_id:
+        return {"active": False}
+    _preview.touch()
+    return _preview_dto(info)
+
+
+@app.delete("/api/runs/{run_id}/preview")
+async def stop_preview(run_id: int):
+    info = _preview.status()
+    if info is None or info.run_id != run_id:
+        return {"stopped": False}
+    stopped = await _preview.stop()
+    return {"stopped": stopped}
 
 
 @app.get("/api/healthz")
