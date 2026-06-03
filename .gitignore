@@ -30,3 +30,10 @@ workspaces/
 *.sqlite
 *.sqlite3
 backend/shipit.db*
+
+# Local dev/test artifacts
+.playwright-mcp/
+*.log
+/*.png
+# stray lockfile from an accidental `npm` run at the repo root (npm belongs in frontend/)
+/package-lock.json
