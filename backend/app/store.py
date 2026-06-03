@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS gates (
 );
 
 CREATE INDEX IF NOT EXISTS gates_run_idx ON gates(run_id, status);
+
+CREATE TABLE IF NOT EXISTS previews (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    run_id INTEGER NOT NULL,
+    pid INTEGER NOT NULL,
+    port INTEGER NOT NULL,
+    started_at REAL NOT NULL
+);
 """
 
 
@@ -242,6 +250,30 @@ class Store:
                     (run_id,),
                 ).fetchall()
             ]
+
+    # --- preview (one active local preview server) -------------------------
+
+    def set_active_preview(
+        self, *, run_id: int, pid: int, port: int, started_at: float
+    ) -> None:
+        """Upsert the single preview row. Overwrites any existing preview."""
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO previews (id, run_id, pid, port, started_at) "
+                "VALUES (1, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "run_id=excluded.run_id, pid=excluded.pid, "
+                "port=excluded.port, started_at=excluded.started_at",
+                (run_id, pid, port, started_at),
+            )
+
+    def get_active_preview(self):
+        with connect(self.db_path) as conn:
+            return conn.execute("SELECT * FROM previews WHERE id=1").fetchone()
+
+    def clear_active_preview(self) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute("DELETE FROM previews WHERE id=1")
 
     # --- restart recovery --------------------------------------------------
 
