@@ -78,6 +78,27 @@ async def test_deploy_failed_is_previewable_happy_path(wired, tmp_path, monkeypa
     assert other == {"active": False}
 
 
+async def test_start_500_on_preview_error(wired, tmp_path, monkeypatch):
+    from app.preview import PreviewError
+
+    store = wired
+    ws = tmp_path / "w"
+    (ws / "node_modules").mkdir(parents=True)
+    (ws / "package.json").write_text("{}", encoding="utf-8")
+    rid = store.create_run(idea="x", workspace=ws)
+    store.finish_run(rid, "built")
+
+    async def boom(run_id, workspace):
+        raise PreviewError("no free preview port available")
+
+    monkeypatch.setattr(srv._preview, "start", boom)
+
+    with pytest.raises(HTTPException) as ei:
+        await srv.start_preview(rid)
+    assert ei.value.status_code == 500
+    assert "port" in ei.value.detail
+
+
 async def test_stop_only_stops_matching_run(wired, tmp_path, monkeypatch):
     store = wired
     info = PreviewInfo(

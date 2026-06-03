@@ -98,7 +98,11 @@ _POLL_INTERVAL_S = 0.25
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _recover_runs()
-    await _preview.recover()        # reap any preview orphaned by a crash
+    # Reaping an orphaned preview must never block the server from coming up.
+    try:
+        await _preview.recover()    # reap any preview orphaned by a crash
+    except Exception:
+        logger.exception("preview recovery failed; continuing startup")
     _preview.start_reaper()         # idle auto-stop loop
     try:
         yield
