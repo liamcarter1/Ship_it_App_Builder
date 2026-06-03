@@ -2,7 +2,7 @@
 // `/api/*`, and next.config.mjs rewrites those calls to the FastAPI backend
 // (default http://127.0.0.1:8000). Keeping a single base path here means
 // switching to a different deployment topology is a one-line change.
-import type { RunDTO } from './types';
+import type { PreviewDTO, RunDTO } from './types';
 
 const API = '/api';
 
@@ -77,4 +77,25 @@ export async function cancelRun(runId: number): Promise<{ cancelled_gates: strin
     throw new Error(`${res.status} ${res.statusText}`);
   }
   return (await res.json()) as { cancelled_gates: string[] };
+}
+
+export async function getPreview(runId: number): Promise<PreviewDTO> {
+  return getJson<PreviewDTO>(`/runs/${runId}/preview`);
+}
+
+export async function startPreview(runId: number): Promise<PreviewDTO> {
+  const res = await fetch(`${API}/runs/${runId}/preview`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as PreviewDTO;
+}
+
+export async function stopPreview(runId: number): Promise<{ stopped: boolean }> {
+  const res = await fetch(`${API}/runs/${runId}/preview`, { method: 'DELETE' });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as { stopped: boolean };
 }

@@ -52,3 +52,11 @@ export interface RunDTO {
   error: string | null;
   live: boolean;
 }
+
+export interface PreviewDTO {
+  active: boolean;
+  run_id?: number;
+  port?: number;
+  url?: string;
+  started_at?: number;
+}
