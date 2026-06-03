@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ActivityStream } from '@/components/ActivityStream';
+import { PreviewPanel } from '@/components/PreviewPanel';
 import { cancelRun, getRun } from '@/lib/api';
 import { statusColour } from '@/lib/status';
 import type { RunDTO } from '@/lib/types';
@@ -65,6 +66,7 @@ export default function RunPage({ params }: PageProps) {
   if (!run) return <p className="text-zinc-500">Loading run #{runId}…</p>;
 
   const finished = !run.live && run.status !== 'running';
+  const previewable = ['built', 'deployed', 'deploy_failed'].includes(run.status);
 
   return (
     <div className="space-y-6">
@@ -112,6 +114,8 @@ export default function RunPage({ params }: PageProps) {
         )}
         <p className="text-xs text-zinc-500">workspace: {run.workspace}</p>
       </div>
+
+      {previewable && <PreviewPanel runId={runId} />}
 
       <ActivityStream runId={runId} alreadyFinished={finished} />
     </div>
