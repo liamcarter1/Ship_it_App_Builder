@@ -107,3 +107,72 @@ def _wait_until_ready(
                 return
         time.sleep(0.25)
     raise PreviewError(f"preview did not become ready within {timeout:.0f}s")
+
+
+import asyncio
+
+
+class PreviewManager:
+    """Owns at most one local preview process."""
+
+    def __init__(self, store, *, idle_timeout_s: float = PREVIEW_IDLE_TIMEOUT_S):
+        self._store = store
+        self._idle_timeout_s = idle_timeout_s
+        self._info: Optional[PreviewInfo] = None
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = asyncio.Lock()
+        self._reaper: Optional[asyncio.Task] = None
+
+    def status(self) -> Optional[PreviewInfo]:
+        return self._info
+
+    def touch(self) -> None:
+        if self._info is not None:
+            self._info.last_active = time.time()
+
+    async def start(self, run_id: int, workspace: Path) -> PreviewInfo:
+        async with self._lock:
+            if self._info is not None and self._info.run_id == run_id:
+                self._info.last_active = time.time()
+                return self._info
+            if self._info is not None:
+                await self._stop_locked()
+
+            port = _find_free_port()
+            proc = await asyncio.to_thread(_spawn_dev_server, Path(workspace), port)
+            try:
+                await asyncio.to_thread(
+                    _wait_until_ready, proc, port, Path(workspace)
+                )
+            except PreviewError:
+                await asyncio.to_thread(kill_process_tree, proc.pid)
+                raise
+
+            now = time.time()
+            info = PreviewInfo(
+                run_id=run_id,
+                pid=proc.pid,
+                port=port,
+                url=f"http://localhost:{port}",
+                started_at=now,
+                last_active=now,
+            )
+            self._info = info
+            self._proc = proc
+            self._store.set_active_preview(
+                run_id=run_id, pid=proc.pid, port=port, started_at=now
+            )
+            return info
+
+    async def stop(self) -> bool:
+        async with self._lock:
+            return await self._stop_locked()
+
+    async def _stop_locked(self) -> bool:
+        if self._info is None:
+            return False
+        await asyncio.to_thread(kill_process_tree, self._info.pid)
+        self._store.clear_active_preview()
+        self._info = None
+        self._proc = None
+        return True
