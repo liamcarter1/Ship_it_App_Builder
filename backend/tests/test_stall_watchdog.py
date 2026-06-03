@@ -228,7 +228,7 @@ def test_config_dict_roundtrips_timeouts(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _kill_process_tree tests
+# kill_process_tree tests
 # ---------------------------------------------------------------------------
 
 
