@@ -11,6 +11,7 @@ No real npm is spawned in tests: `_spawn_dev_server`, `_wait_until_ready`, and
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import socket
@@ -109,9 +110,6 @@ def _wait_until_ready(
     raise PreviewError(f"preview did not become ready within {timeout:.0f}s")
 
 
-import asyncio
-
-
 class PreviewManager:
     """Owns at most one local preview process."""
 
@@ -176,3 +174,36 @@ class PreviewManager:
         self._info = None
         self._proc = None
         return True
+
+    async def recover(self) -> None:
+        """Startup sweep: kill the orphaned tree from a previous process and
+        clear the persisted record. Safe if the PID is already gone."""
+        row = self._store.get_active_preview()
+        if row is None:
+            return
+        await asyncio.to_thread(kill_process_tree, row["pid"])
+        self._store.clear_active_preview()
+
+    async def reap_idle_once(self) -> None:
+        """Stop the preview if it has been idle past the timeout. One pass."""
+        info = self._info
+        if info is not None and time.time() - info.last_active > self._idle_timeout_s:
+            await self.stop()
+
+    def start_reaper(self, interval_s: float = 30.0) -> None:
+        if self._reaper is None:
+            self._reaper = asyncio.create_task(self._reaper_loop(interval_s))
+
+    async def stop_reaper(self) -> None:
+        if self._reaper is not None:
+            self._reaper.cancel()
+            try:
+                await self._reaper
+            except asyncio.CancelledError:
+                pass
+            self._reaper = None
+
+    async def _reaper_loop(self, interval_s: float) -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            await self.reap_idle_once()

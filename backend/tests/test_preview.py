@@ -117,3 +117,38 @@ async def test_touch_bumps_last_active(mgr, tmp_path, monkeypatch):
     monkeypatch.setattr("app.preview.time.time", lambda: bumped)
     manager.touch()
     assert manager.status().last_active == bumped
+
+
+async def test_recover_kills_orphan_and_clears(mgr, tmp_path):
+    manager, store, killed, _spawned = mgr
+    # Simulate a record left by a dead process (no in-memory state).
+    store.set_active_preview(run_id=3, pid=98765, port=4300, started_at=1.0)
+    await manager.recover()
+    assert 98765 in killed
+    assert store.get_active_preview() is None
+
+
+async def test_recover_is_noop_without_record(mgr):
+    manager, _store, killed, _spawned = mgr
+    await manager.recover()  # must not raise
+    assert killed == []
+
+
+async def test_idle_reap_once_stops_stale_preview(mgr, tmp_path, monkeypatch):
+    manager, store, killed, _spawned = mgr
+    info = await manager.start(7, tmp_path)
+    # Make it look idle beyond the timeout.
+    monkeypatch.setattr(
+        "app.preview.time.time", lambda: info.last_active + manager._idle_timeout_s + 1
+    )
+    await manager.reap_idle_once()
+    assert info.pid in killed
+    assert manager.status() is None
+
+
+async def test_idle_reap_once_keeps_fresh_preview(mgr, tmp_path):
+    manager, _store, killed, _spawned = mgr
+    await manager.start(7, tmp_path)
+    await manager.reap_idle_once()  # just started -> not idle
+    assert killed == []
+    assert manager.status() is not None
