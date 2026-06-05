@@ -140,7 +140,35 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
     if (!streamEnded) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [events.length, streamEnded]);
 
+  // Live "we're still working" indicators. Ticks every second while the run
+  // is in flight so the elapsed-since-last-event counter updates smoothly.
+  // Long-running stages (Scaffolder waiting on `npm install`, Coder thinking
+  // before writing) can go 30-120s without emitting an event; the counter
+  // and the calming hint below tell the user that quiet is normal.
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    if (streamEnded) return;
+    const handle = setInterval(() => setNow(Date.now() / 1000), 1000);
+    return () => clearInterval(handle);
+  }, [streamEnded]);
+
+  // Derive the currently-running stage from the event log: walk backwards
+  // until we find the most recent stage_start or stage_end. A stage_start
+  // with no matching stage_end means that stage is still in flight.
+  let currentStage: string | null = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind === 'stage_start') { currentStage = e.source; break; }
+    if (e.kind === 'stage_end')   { currentStage = null;     break; }
+  }
+
+  const lastEvent = events.length > 0 ? events[events.length - 1] : null;
+  const secondsSinceLastEvent =
+    lastEvent != null && lastEvent.ts > 0 ? Math.max(0, Math.floor(now - lastEvent.ts)) : null;
+
   const openGateList = Object.values(openGates).sort((a, b) => a.ts - b.ts);
+  const showQuietHint =
+    !streamEnded && currentStage != null && secondsSinceLastEvent != null && secondsSinceLastEvent >= 30;
 
   return (
     <div className="space-y-3">
@@ -162,25 +190,59 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
         />
       ))}
       <div className="rounded border border-zinc-800 bg-zinc-950">
-        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2 text-xs">
+        <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-3 py-2 text-xs">
           <div className="text-zinc-400">
             {events.length} event{events.length === 1 ? '' : 's'}
           </div>
-          <div className="text-zinc-400">
+          <div className="flex items-center gap-2 text-zinc-400 min-w-0">
             {streamEnded ? (
               <span className="text-zinc-500">stream ended</span>
-            ) : connected ? (
-              <span className="text-cyan-400">● live</span>
+            ) : !connected ? (
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+                <span className="text-amber-400">reconnecting…</span>
+              </>
+            ) : currentStage ? (
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span className={`${sourceClasses(currentStage)} truncate`}>
+                  running {currentStage}
+                </span>
+                {secondsSinceLastEvent != null && (
+                  <span className="text-zinc-500 tabular-nums">
+                    · {formatElapsed(secondsSinceLastEvent)}
+                  </span>
+                )}
+              </>
             ) : (
-              <span className="text-amber-400">reconnecting…</span>
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span className="text-cyan-400">live</span>
+              </>
             )}
           </div>
         </div>
+        {showQuietHint && (
+          <div className="border-b border-zinc-800 bg-zinc-900/40 px-3 py-1.5 text-[11px] text-zinc-500 italic">
+            Quiet stretches are normal — the Scaffolder waits on <code className="text-zinc-400">npm install</code>{' '}
+            (often 60-120s) and the Coder thinks before writing. Nothing&apos;s stuck.
+          </div>
+        )}
         <div className="max-h-[60vh] overflow-y-auto p-3 text-sm leading-relaxed">
           {events.length === 0 ? (
             <p className="text-zinc-600 italic">Waiting for the orchestrator to emit its first event…</p>
           ) : (
             events.map((ev, i) => <EventRow key={ev.id ?? `${ev.ts}-${i}`} ev={ev} />)
+          )}
+          {!streamEnded && events.length > 0 && (
+            // A subtle "still working" line at the bottom of the stream so
+            // the eye has something to settle on during quiet stretches.
+            <div className="mt-2 flex items-center gap-2 text-xs text-zinc-600">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-zinc-500 animate-pulse" />
+              <span>
+                {currentStage ? `${currentStage} working…` : 'waiting for next stage…'}
+              </span>
+            </div>
           )}
           <div ref={bottomRef} />
         </div>
@@ -188,6 +250,13 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
       </div>
     </div>
   );
+}
+
+function formatElapsed(s: number): string {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return rest === 0 ? `${m}m` : `${m}m ${rest}s`;
 }
 
 function EventRow({ ev }: { ev: PipelineEventDTO }) {
