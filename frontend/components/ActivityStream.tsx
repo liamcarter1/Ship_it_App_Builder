@@ -33,9 +33,18 @@ interface Props {
   /** When the parent says the run has finished, we close the stream and stop
    *  showing "live". The stream itself also closes on `pipeline_end`. */
   alreadyFinished: boolean;
+  /** Ground-truth liveness signal from `GET /api/runs/{id}.live`, which
+   *  mirrors the backend's `_active_runs` registry — true iff the
+   *  orchestrator asyncio task is currently alive in the server process.
+   *  This is what keys the pulse animation and the elapsed counter;
+   *  *not* the SSE connection state, which can be open against a dead task. */
+  liveOnBackend: boolean;
+  /** `run.status` from the DB. Terminal values (anything other than
+   *  `'running'`) freeze the indicator even if SSE somehow remains open. */
+  runStatus: string;
 }
 
-export function ActivityStream({ runId, alreadyFinished }: Props) {
+export function ActivityStream({ runId, alreadyFinished, liveOnBackend, runStatus }: Props) {
   const [events, setEvents] = useState<PipelineEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
   const [streamEnded, setStreamEnded] = useState(alreadyFinished);
@@ -140,17 +149,25 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
     if (!streamEnded) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [events.length, streamEnded]);
 
-  // Live "we're still working" indicators. Ticks every second while the run
-  // is in flight so the elapsed-since-last-event counter updates smoothly.
-  // Long-running stages (Scaffolder waiting on `npm install`, Coder thinking
-  // before writing) can go 30-120s without emitting an event; the counter
-  // and the calming hint below tell the user that quiet is normal.
+  // GROUND TRUTH for "is this run genuinely alive right now?". All three
+  // must hold: the backend's _active_runs registry confirms the orchestrator
+  // task exists, the DB hasn't recorded a terminal status, and we haven't
+  // seen the terminal event on the wire. Any one flipping false freezes
+  // every indicator — the pulse, the elapsed counter, and the footer dot.
+  // This is the line that makes the UI tell the truth instead of just
+  // spinning whenever the SSE connection is open.
+  const isGenuinelyAlive = liveOnBackend && !streamEnded && runStatus === 'running';
+
+  // Tick a `now` clock once a second so the elapsed-since-last-event counter
+  // updates smoothly. Gated on isGenuinelyAlive — when the run ends, we stop
+  // updating `now`, which freezes the displayed counter at its final value
+  // instead of letting it climb indefinitely after the work has stopped.
   const [now, setNow] = useState(() => Date.now() / 1000);
   useEffect(() => {
-    if (streamEnded) return;
+    if (!isGenuinelyAlive) return;
     const handle = setInterval(() => setNow(Date.now() / 1000), 1000);
     return () => clearInterval(handle);
-  }, [streamEnded]);
+  }, [isGenuinelyAlive]);
 
   // Derive the currently-running stage from the event log: walk backwards
   // until we find the most recent stage_start or stage_end. A stage_start
@@ -166,9 +183,25 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
   const secondsSinceLastEvent =
     lastEvent != null && lastEvent.ts > 0 ? Math.max(0, Math.floor(now - lastEvent.ts)) : null;
 
+  // Watchdog status for the current stage: did the server-side watchdog
+  // emit a stage_stalled that hasn't yet been followed by a stage_retry?
+  // If so, we know with certainty that this stage is stuck (the backend
+  // told us). This is stronger than "Ns since last event" because the
+  // watchdog actually killed and intends to restart a hung subprocess.
+  let watchdogState: 'stalled' | 'retrying' | null = null;
+  if (currentStage) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.source !== currentStage) continue;
+      if (e.kind === 'stage_stalled') { watchdogState = 'stalled'; break; }
+      if (e.kind === 'stage_retry')   { watchdogState = 'retrying'; break; }
+      if (e.kind === 'stage_start')   { break; } // current stage started fresh
+    }
+  }
+
   const openGateList = Object.values(openGates).sort((a, b) => a.ts - b.ts);
   const showQuietHint =
-    !streamEnded && currentStage != null && secondsSinceLastEvent != null && secondsSinceLastEvent >= 30;
+    isGenuinelyAlive && currentStage != null && secondsSinceLastEvent != null && secondsSinceLastEvent >= 30;
 
   return (
     <div className="space-y-3">
@@ -195,12 +228,46 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
             {events.length} event{events.length === 1 ? '' : 's'}
           </div>
           <div className="flex items-center gap-2 text-zinc-400 min-w-0">
-            {streamEnded ? (
-              <span className="text-zinc-500">stream ended</span>
+            {streamEnded || runStatus !== 'running' ? (
+              // Terminal: DB says the run is over, OR we saw the end event.
+              // No pulse — the work has definitively stopped.
+              <span className="text-zinc-500">
+                stream ended{runStatus !== 'running' ? ` · ${runStatus}` : ''}
+              </span>
+            ) : !liveOnBackend ? (
+              // Backend says the orchestrator task is gone but the run row
+              // hasn't been finalised yet AND we haven't seen pipeline_end
+              // on the wire. This is a transient race (task exiting,
+              // finally block still running) — be honest about it.
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-zinc-500" />
+                <span className="text-zinc-400">backend task ended — finalising…</span>
+              </>
             ) : !connected ? (
+              // Backend says alive, but SSE has dropped. The run IS still
+              // running on the server; we just can't see it right now.
               <>
                 <span className="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
                 <span className="text-amber-400">reconnecting…</span>
+                <span className="text-zinc-500">· backend confirms still alive</span>
+              </>
+            ) : watchdogState === 'stalled' ? (
+              // Server-side watchdog has positively detected a stall on
+              // the current stage. Truth-grade signal that "stuck" is real.
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                <span className="text-amber-400 truncate">watchdog: {currentStage} stalled</span>
+                {secondsSinceLastEvent != null && (
+                  <span className="text-zinc-500 tabular-nums">· {formatElapsed(secondsSinceLastEvent)}</span>
+                )}
+              </>
+            ) : watchdogState === 'retrying' ? (
+              <>
+                <span className="inline-block h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span className="text-cyan-400 truncate">watchdog: retrying {currentStage}</span>
+                {secondsSinceLastEvent != null && (
+                  <span className="text-zinc-500 tabular-nums">· {formatElapsed(secondsSinceLastEvent)}</span>
+                )}
               </>
             ) : currentStage ? (
               <>
@@ -209,12 +276,11 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
                   running {currentStage}
                 </span>
                 {secondsSinceLastEvent != null && (
-                  <span className="text-zinc-500 tabular-nums">
-                    · {formatElapsed(secondsSinceLastEvent)}
-                  </span>
+                  <span className="text-zinc-500 tabular-nums">· {formatElapsed(secondsSinceLastEvent)}</span>
                 )}
               </>
             ) : (
+              // Backend alive, SSE open, no current stage (between stages).
               <>
                 <span className="inline-block h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
                 <span className="text-cyan-400">live</span>
@@ -222,10 +288,11 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
             )}
           </div>
         </div>
-        {showQuietHint && (
+        {showQuietHint && watchdogState == null && (
           <div className="border-b border-zinc-800 bg-zinc-900/40 px-3 py-1.5 text-[11px] text-zinc-500 italic">
             Quiet stretches are normal — the Scaffolder waits on <code className="text-zinc-400">npm install</code>{' '}
-            (often 60-120s) and the Coder thinks before writing. Nothing&apos;s stuck.
+            (often 60-120s) and the Coder thinks before writing. If something&apos;s genuinely stuck the
+            server-side watchdog will fire a <code className="text-zinc-400">stage_stalled</code> event.
           </div>
         )}
         <div className="max-h-[60vh] overflow-y-auto p-3 text-sm leading-relaxed">
@@ -234,9 +301,11 @@ export function ActivityStream({ runId, alreadyFinished }: Props) {
           ) : (
             events.map((ev, i) => <EventRow key={ev.id ?? `${ev.ts}-${i}`} ev={ev} />)
           )}
-          {!streamEnded && events.length > 0 && (
+          {isGenuinelyAlive && events.length > 0 && (
             // A subtle "still working" line at the bottom of the stream so
             // the eye has something to settle on during quiet stretches.
+            // Animates ONLY while genuinely alive — same truth signal as
+            // the header pulse, so the two never disagree.
             <div className="mt-2 flex items-center gap-2 text-xs text-zinc-600">
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-zinc-500 animate-pulse" />
               <span>
@@ -334,6 +403,38 @@ function EventRow({ ev }: { ev: PipelineEventDTO }) {
         <div className={approved ? 'text-emerald-300' : 'text-rose-300'}>
           {approved ? '✓' : '✗'} gate decision: {ev.text} ({approved ? 'approved' : 'rejected'})
           {meta.notes && <span className="text-zinc-400"> — notes: {meta.notes}</span>}
+        </div>
+      );
+    }
+    case 'stage_stalled': {
+      // Server-side watchdog detected an idle/total-time breach on this
+      // stage. Truth-grade evidence that something genuinely got stuck —
+      // surface it loudly. Meta carries idle_s and timeout_s when present.
+      const meta = ev.meta as { idle_s?: number; timeout_s?: number; reason?: string };
+      return (
+        <div className="mt-2 rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-amber-200 text-xs">
+          <span className="font-semibold">⚠ watchdog: {ev.source} stalled</span>
+          {meta.idle_s != null && (
+            <span className="text-amber-300/70"> · idle {formatElapsed(Math.floor(meta.idle_s))}</span>
+          )}
+          {meta.timeout_s != null && (
+            <span className="text-zinc-500"> (timeout {formatElapsed(Math.floor(meta.timeout_s))})</span>
+          )}
+          {meta.reason && <span className="text-zinc-400"> — {meta.reason}</span>}
+          {ev.text && !meta.reason && <span className="text-zinc-400"> — {ev.text}</span>}
+        </div>
+      );
+    }
+    case 'stage_retry': {
+      // Watchdog killed the hung subprocess and is starting the stage
+      // fresh. Distinct cyan colour so it reads as "recovery action," not
+      // "another failure on top of the stall."
+      const meta = ev.meta as { attempt?: number };
+      return (
+        <div className="mt-1 rounded border border-cyan-800/60 bg-cyan-950/20 px-2 py-1 text-cyan-200 text-xs">
+          <span className="font-semibold">↻ watchdog: retrying {ev.source}</span>
+          {meta.attempt != null && <span className="text-cyan-300/70"> · attempt {meta.attempt}</span>}
+          {ev.text && <span className="text-zinc-400"> — {ev.text}</span>}
         </div>
       );
     }

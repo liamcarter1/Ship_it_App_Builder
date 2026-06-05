@@ -117,7 +117,12 @@ export default function RunPage({ params }: PageProps) {
 
       {previewable && <PreviewPanel runId={runId} />}
 
-      <ActivityStream runId={runId} alreadyFinished={finished} />
+      <ActivityStream
+        runId={runId}
+        alreadyFinished={finished}
+        liveOnBackend={run.live}
+        runStatus={run.status}
+      />
     </div>
   );
 }
