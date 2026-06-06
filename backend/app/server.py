@@ -409,6 +409,70 @@ async def cancel_run(run_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Post-hoc deploy (M4+ polish — push a `built` run to Vercel on demand)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/runs/{run_id}/deploy")
+async def deploy_run(run_id: int):
+    """Push an already-`built` run to Vercel production.
+
+    For when you started a run with Deploy unticked, previewed it locally,
+    and decided you want it live after all. The workspace persists on disk,
+    so we re-enter just the deployer stage against it and append events to
+    the same run_id. The click here counts as approval — we skip the
+    deploy gate.
+
+    Requires `VERCEL_TOKEN` in the server's environment. Refuses if the run
+    isn't `built`, the workspace is gone, or a deploy is already in flight.
+    """
+    row = _store.get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if row["status"] != "built":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"run is '{row['status']}'; only 'built' runs can be deployed "
+                "on demand (re-deploying a deployed run isn't supported yet)"
+            ),
+        )
+    workspace = Path(row["workspace"])
+    if not workspace.exists() or not (workspace / "package.json").exists():
+        raise HTTPException(
+            status_code=410,
+            detail="workspace is gone from disk — cannot deploy",
+        )
+    if not os.environ.get("VERCEL_TOKEN"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "VERCEL_TOKEN is not set on the server. Add it to backend/.env "
+                "and restart uvicorn, then try again."
+            ),
+        )
+    if run_id in _active_runs:
+        raise HTTPException(status_code=409, detail="run is already in flight")
+
+    bus = EventBus()
+    config = _config_from_row(row)
+    # Force deploy on for this task (the original run had deploy=False).
+    config.deploy = True
+
+    async def _deploy_only() -> None:
+        try:
+            orchestrator = Orchestrator(bus=bus, store=_store, config=config)
+            await orchestrator.deploy_built_run(run_id)
+        except Exception:
+            logger.exception("post-hoc deploy of run %s failed", run_id)
+        finally:
+            _active_runs.pop(run_id, None)
+
+    _active_runs[run_id] = asyncio.create_task(_deploy_only())
+    return {"deploying": True, "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
 # Local preview (run the generated app)
 # ---------------------------------------------------------------------------
 

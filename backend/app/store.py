@@ -311,6 +311,19 @@ class Store:
                 (time.time(), error, run_id),
             )
 
+    def mark_running(self, run_id: int) -> None:
+        """Flip a run's status back to 'running' (clearing `finished_at` and any
+        prior `error`). Used by the post-hoc deploy path: a `built` run we want
+        to push to Vercel goes back to 'running' for the duration of the
+        deployer stage, then `finish_run` finalises it as 'deployed' or
+        'deploy_failed'. The dashboard's existing live-run plumbing then
+        Just Works (live=true, status='running' → pulse animates)."""
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE runs SET status='running', finished_at=NULL, error=NULL WHERE id=?",
+                (run_id,),
+            )
+
     def list_runs(self, limit: int = 20) -> list[sqlite3.Row]:
         with connect(self.db_path) as conn:
             return list(

@@ -99,3 +99,20 @@ export async function stopPreview(runId: number): Promise<{ stopped: boolean }> 
   }
   return (await res.json()) as { stopped: boolean };
 }
+
+export async function deployRun(runId: number): Promise<{ deploying: boolean; run_id: number }> {
+  const res = await fetch(`${API}/runs/${runId}/deploy`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    // The backend sends `{detail: "..."}` for 4xx; surface that directly to the
+    // UI rather than the generic "409 Conflict" so the user sees the *reason*
+    // (e.g. "VERCEL_TOKEN is not set").
+    let message = body;
+    try {
+      const parsed = JSON.parse(body) as { detail?: string };
+      if (parsed?.detail) message = parsed.detail;
+    } catch { /* keep raw body */ }
+    throw new Error(message || `${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as { deploying: boolean; run_id: number };
+}

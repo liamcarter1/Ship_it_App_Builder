@@ -86,16 +86,18 @@ export default function RunPage({ params }: PageProps) {
         </div>
       </div>
 
-      <div className="rounded border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
-        <h1 className="text-lg text-zinc-100">{run.idea}</h1>
-        <div className="flex flex-wrap items-center gap-4 text-sm">
-          <span className={statusColour(run.status)}>
+      <div className="rounded-xl border border-zinc-800 bg-gradient-to-br from-zinc-900/60 to-zinc-950/40 p-5 space-y-3 shadow-lg shadow-black/20">
+        <h1 className="text-xl font-medium text-zinc-100 leading-snug">{run.idea}</h1>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full border border-current/30 bg-current/5 px-2.5 py-0.5 text-xs font-medium ${statusColour(run.status)}`}
+          >
+            {run.live && <span className="inline-block h-1.5 w-1.5 rounded-full bg-current animate-pulse" />}
             {run.status}
-            {run.live && <span className="ml-1 text-cyan-400">● live</span>}
           </span>
           {run.total_cost_usd != null && (
-            <span className="text-zinc-400">
-              cost <span className="text-zinc-200 tabular-nums">${run.total_cost_usd.toFixed(4)}</span>
+            <span className="rounded-full bg-zinc-800/60 px-2.5 py-0.5 text-xs text-zinc-300">
+              cost <span className="text-zinc-100 tabular-nums">${run.total_cost_usd.toFixed(4)}</span>
             </span>
           )}
           {run.deploy_url && (
@@ -103,19 +105,27 @@ export default function RunPage({ params }: PageProps) {
               href={run.deploy_url}
               target="_blank"
               rel="noreferrer"
-              className="text-purple-300 underline"
+              className="inline-flex items-center gap-1 rounded-full border border-purple-700/60 bg-purple-950/30 px-2.5 py-0.5 text-xs text-purple-200 hover:bg-purple-900/40 transition"
             >
-              {run.deploy_url}
+              ▲ {run.deploy_url}
             </a>
           )}
         </div>
         {run.error && (
-          <p className="text-xs text-rose-300">error: {run.error}</p>
+          <p className="rounded-md border border-rose-700/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
+            <span className="font-semibold">error:</span> {run.error}
+          </p>
         )}
-        <p className="text-xs text-zinc-500">workspace: {run.workspace}</p>
+        <p className="text-[11px] text-zinc-500 break-all">workspace: <code>{run.workspace}</code></p>
       </div>
 
-      {previewable && <PreviewPanel runId={runId} />}
+      {previewable && (
+        <PreviewPanel
+          runId={runId}
+          runStatus={run.status}
+          deployUrl={run.deploy_url}
+        />
+      )}
 
       <ActivityStream
         runId={runId}

@@ -834,6 +834,79 @@ class Orchestrator:
             )
         return parsed
 
+    async def deploy_built_run(self, run_id: int) -> RunOutcome:
+        """Deploy an already-`built` run to Vercel on demand.
+
+        The original run finished at status='built' because the user didn't
+        tick the Deploy box. This re-enters just the deployer stage against
+        the persisted workspace, recording events under the same run_id so
+        the existing dashboard plumbing (status polling, event log) Just
+        Works. The user's click on the Deploy button counts as approval —
+        we skip the deploy gate.
+
+        Cost is added to the run's existing total. On success the run row
+        flips to 'deployed' with the URL; on failure it flips to
+        'deploy_failed' with the error.
+        """
+        row = self.store.get_run(run_id)
+        if row is None:
+            raise PipelineFailure(f"run {run_id} not found")
+        workspace = Path(row["workspace"])
+        if not workspace.exists():
+            raise PipelineFailure(f"workspace gone: {workspace}")
+
+        listener = attach_store_to_bus(self.bus, self.store, run_id)
+        outcome = RunOutcome(
+            run_id=run_id, idea=row["idea"], workspace=workspace, status="running"
+        )
+        existing_cost: float = row["total_cost_usd"] or 0.0
+        try:
+            self.store.mark_running(run_id)
+            await self.bus.emit(
+                PipelineEvent(
+                    kind="pipeline_resumed",
+                    source="orchestrator",
+                    text="post-hoc deploy",
+                    meta={"run_id": run_id, "mode": "deploy_only"},
+                )
+            )
+            try:
+                deploy = await self._stage_deployer(workspace, outcome)
+                outcome.deploy = deploy
+                outcome.status = (
+                    "deployed" if deploy.get("status") == "deployed" else "deploy_failed"
+                )
+            except PipelineFailure as exc:
+                outcome.status = "deploy_failed"
+                outcome.error = str(exc)
+            except Exception as exc:
+                outcome.status = "deploy_failed"
+                outcome.error = f"{type(exc).__name__}: {exc}"
+
+            await self.bus.emit(
+                PipelineEvent(
+                    kind="pipeline_end",
+                    source="orchestrator",
+                    text=outcome.error or outcome.status,
+                    meta={
+                        "is_error": outcome.status != "deployed",
+                        "total_cost_usd": existing_cost + outcome.total_cost_usd,
+                        "deploy_url": (outcome.deploy or {}).get("url"),
+                        "mode": "deploy_only",
+                    },
+                )
+            )
+            self.store.finish_run(
+                run_id,
+                status=outcome.status,
+                total_cost_usd=existing_cost + outcome.total_cost_usd,
+                deploy_url=(outcome.deploy or {}).get("url"),
+                error=outcome.error,
+            )
+        finally:
+            self.bus.remove(listener)
+        return outcome
+
 
 # ---------------------------------------------------------------------------
 # Convenience
