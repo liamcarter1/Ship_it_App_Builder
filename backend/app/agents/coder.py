@@ -44,6 +44,18 @@ Hard rules:
   need state, effects, or event handlers.
 - Keep imports valid: every `import` must resolve. No JSX in `.ts` files.
 - Style the page to match the `visual_tone` in the spec.
+- **External API identifiers: use stable, dated IDs, never `*-latest` aliases.**
+  `lint`/`tsc`/`build` will pass against any string, but moving aliases get
+  deprecated by the provider and return 404 at runtime when a user actually
+  tries the app. Specifically:
+    - Anthropic models: use `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`,
+      or `claude-opus-4-8`. Do NOT use `claude-3-5-sonnet-latest` or any
+      `*-latest` form.
+    - Same rule for any other SaaS API with versioned IDs (model names,
+      API versions, schema versions): prefer the most recent stable
+      dated/numbered identifier you know.
+  If the spec doesn't pin a specific ID, pick a sensible current one and
+  mention which in your final summary so the human can swap it.
 
 When done, reply with a one-line summary of what you wrote (which files,
 which sections) and STOP. Do not loop. Do not run the build yourself — the
